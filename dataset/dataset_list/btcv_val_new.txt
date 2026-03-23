@@ -1,0 +1,6 @@
+01_Multi-Atlas_Labeling/img/img0027.nii.gz	01_Multi-Atlas_Labeling/label/label0027.nii.gz
+01_Multi-Atlas_Labeling/img/img0028.nii.gz	01_Multi-Atlas_Labeling/label/label0028.nii.gz
+01_Multi-Atlas_Labeling/img/img0023.nii.gz	01_Multi-Atlas_Labeling/label/label0023.nii.gz
+01_Multi-Atlas_Labeling/img/img0039.nii.gz	01_Multi-Atlas_Labeling/label/label0039.nii.gz
+01_Multi-Atlas_Labeling/img/img0001.nii.gz	01_Multi-Atlas_Labeling/label/label0001.nii.gz
+01_Multi-Atlas_Labeling/img/img0038.nii.gz	01_Multi-Atlas_Labeling/label/label0038.nii.gz
