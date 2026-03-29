@@ -1,4 +1,26 @@
 # Continual Learning
+## Introduction
+如果增量学习仅分两个步骤的话：
+
+初始训练
+
+```bash
+uv run python train.py --phase train --data_root_path ./data/ --train_data_txt_path ./dataset/dataset_list/btcv_train_new.txt --val_data_txt_path ./dataset/dataset_list/btcv_val_new.txt --continue_data_txt_path ./dataset/dataset_list/empty_continue.txt --organ_list 1 2 3 4 5 6 --model swinunetr_partial --out_nonlinear sigmoid --out_channels 38 --word_embedding ./pretrained_weights/word_embedding_38class.pth --log_name initial_train --batch_size 1 --roi_x 64 --roi_y 64 --roi_z 64
+```
+
+生成伪标签：
+
+```bash
+python predict.py --log_name initial_train --resume ./output/initial_train/epoch_100.pth --data_root_path ./data --predict_data_txt_path ./dataset/dataset_list/btcv_train_new.txt --organ_list 1 2 3 4 5 6 7 8 --model swinunetr_partial --out_nonlinear sigmoid --out_channels 38
+```
+
+增量学习：
+
+```bash
+python train.py --phase continue --data_root_path ./data --continue_data_txt_path ./dataset/dataset_list/btcv_continue_train.txt --organ_list 1 2 3 4 5 6 7 8 --model swinunetr_partial --out_nonlinear sigmoid --out_channels 38 --pretrain ./output/initial_train/epoch_100.pth --log_name continue_train
+```
+
+
 
 ## Paper
 
@@ -28,26 +50,6 @@ Use the train.py file for training models. An example script is
 
 ```python
 python train.py --phase train --data_root_path ./data --train_data_txt_path ./dataset/dataset_list/btcv_train_new.txt --val_data_txt_path ./dataset/dataset_list/btcv_val_new.txt --organ_list 1 2 3 4 5 6 --max_epoch 101 --warmup_epoch 15 --batch_size 2 --num_samples 1 --lr 1e-4 --model swinunetr --trans_encoding word_embedding --word_embedding ./pretrained_weights/word_embedding_38class.pth --out_nonlinear softmax --out_channels 38 --log_name your_log_folder_name
-```
-
-```
-python train.py 
---phase train
---data_root_path ./data
---train_data_txt_path ./dataset/dataset_list/btcv_train.txt
---val_data_txt_path ./dataset/dataset_list/btcv_val.txt
---organ_list 1 2 3 4 5 6
---max_epoch 101
---warmup_epoch 15
---batch_size 2
---num_samples 1
---lr 1e-4
---model swinunetr
---trans_encoding word_embedding
---word_embedding ./pretrained_weights/word_embedding_38class.pth
---out_nonlinear softmax
---out_channels 38
---log_name your_log_folder_name
 ```
 
 Switch the argument `--model` for different models: `swinunetr` for SwinUNETR, `swinunetr_partial` for the proposed model with organ-specific segmentation heads (this model should be used with `--out_nonlinear sigmoid`).

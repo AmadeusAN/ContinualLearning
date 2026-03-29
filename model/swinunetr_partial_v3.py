@@ -229,7 +229,7 @@ class SwinUNETR(nn.Module):
         if self.encoding == 'rand_embedding':
             self.organ_embedding = nn.Embedding(out_channels, 256)
         elif self.encoding == 'word_embedding':
-            self.register_buffer('organ_embedding', torch.randn(out_channels, 512))
+            self.organ_embedding = nn.Parameter(torch.randn(out_channels, 512))
             # self.text_to_vision = nn.Conv3d(768, 512, kernel_size=1, stride=1, padding=0)
         self.class_num = out_channels
         self.controllers = nn.ModuleList()
@@ -368,6 +368,9 @@ class SwinUNETR(nn.Module):
         elif self.encoding == 'word_embedding':
             task_encoding = self.organ_embedding
             task_encoding = task_encoding.unsqueeze(2).unsqueeze(2).unsqueeze(2)
+        # 打印task_encoding的大小
+        print(f"task_encoding shape: {task_encoding.shape}")
+        print(f"class_num: {self.class_num}")
         # task_encoding torch.Size([31, 256, 1, 1, 1])
 
         x_feat = self.GAP(dec4)
