@@ -8,6 +8,19 @@ pip install torch==1.11.0+cu113 torchvision==0.12.0+cu113 torchaudio==0.11.0 --e
 pip install monai[all]==0.9.0
 pip install -r requirements.txt
 ```
+目前成功过一次的安装依赖的方法是：
+
+```bash
+source .venv/bin/activate && uv pip install torch==1.11.0+cu113 torchvision==0.12.0+cu113 torchaudio==0.11.0 --extra-index-url https://download.pytorch.org/whl/cu113
+
+uv pip install monai[all]==0.9.0
+
+uv pip install -r requirements.txt
+
+uv pip install numpy==1.23.0
+```
+
+
 
 ##### [Optional] If You are using ASU GPU Cluster
 
