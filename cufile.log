@@ -322,3 +322,19 @@
 
  30-03-2026 18:47:47:25 [pid=393169 tid=393169] WARN   0:168 failed to open /proc/driver/nvidia-fs/devcount  error: No such file or directory
  30-03-2026 18:47:47:25 [pid=393169 tid=393169] NOTICE  cufio-drv:727 running in compatible mode
+ 30-03-2026 18:53:27:916 [pid=3557596 tid=3557596] NOTICE  cufio-drv:727 running in compatible mode
+ 30-03-2026 18:57:40:574 [pid=3563756 tid=3563756] NOTICE  cufio-drv:727 running in compatible mode
+ 30-03-2026 19:57:42:947 [pid=3570258 tid=3570258] NOTICE  cufio-drv:727 running in compatible mode
+ 30-03-2026 19:58:34:443 [pid=3571511 tid=3571511] NOTICE  cufio-drv:727 running in compatible mode
+ 30-03-2026 20:00:04:937 [pid=3574198 tid=3574198] NOTICE  cufio-drv:727 running in compatible mode
+ 30-03-2026 20:02:45:192 [pid=3576585 tid=3576585] NOTICE  cufio-drv:727 running in compatible mode
+ 30-03-2026 20:07:08:436 [pid=3579498 tid=3579498] NOTICE  cufio-drv:727 running in compatible mode
+ 30-03-2026 20:08:39:644 [pid=3581302 tid=3581302] NOTICE  cufio-drv:727 running in compatible mode
+ 30-03-2026 20:09:34:899 [pid=3583240 tid=3583240] NOTICE  cufio-drv:727 running in compatible mode
+ 30-03-2026 20:14:03:979 [pid=3586005 tid=3586005] NOTICE  cufio-drv:727 running in compatible mode
+ 30-03-2026 20:14:43:955 [pid=3587801 tid=3587801] NOTICE  cufio-drv:727 running in compatible mode
+ 30-03-2026 20:15:41:505 [pid=3590666 tid=3590666] NOTICE  cufio-drv:727 running in compatible mode
+ 30-03-2026 20:16:26:418 [pid=3592457 tid=3592457] NOTICE  cufio-drv:727 running in compatible mode
+ 30-03-2026 20:17:39:167 [pid=3594799 tid=3594799] NOTICE  cufio-drv:727 running in compatible mode
+ 30-03-2026 20:19:28:152 [pid=3598319 tid=3598319] NOTICE  cufio-drv:727 running in compatible mode
+ 30-03-2026 20:22:49:966 [pid=3606444 tid=3606444] NOTICE  cufio-drv:727 running in compatible mode

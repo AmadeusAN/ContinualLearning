@@ -49,6 +49,11 @@ class DiceLoss(nn.Module):
         total_loss = []
         B = predict.shape[0]
 
+        if target.shape[1] == 1:
+            # 需要进行 one-hot 编码
+            target = F.one_hot(target.long().squeeze(1), num_classes=predict.shape[1])
+            target = target.permute(0, 4, 1, 2, 3).contiguous()
+
         for b in range(B):
             for organ in organ_list:
                 # organ - 1，而你的 organ_list 是从 1 开始的，看样子是完全不需要预测背景了，BTCV 的完整 organ_list 是 1 2 3 4 5 6 7 8 9 10 11 12
@@ -74,6 +79,10 @@ class Multi_BCELoss(nn.Module):
         )
         total_loss = []
         B = predict.shape[0]
+        if target.shape[1] == 1:
+            # 需要进行 one-hot 编码
+            target = F.one_hot(target.long().squeeze(1), num_classes=predict.shape[1])
+            target = target.permute(0, 4, 1, 2, 3).contiguous().float()
 
         for b in range(B):
             for organ in organ_list:
@@ -235,7 +244,6 @@ def process(args):
         word_embedding = torch.load(args.word_embedding)
         model.organ_embedding.data = word_embedding.float()
         print("load word embedding")
-
     model.to(args.device)
     model.train()
     if args.dist:
@@ -345,11 +353,18 @@ def main():
     ## logging
     parser.add_argument("--log_dir", default="output", help="Log directory.")
     parser.add_argument(
-        "--log_name", type=str, required=True, help="Experiment name under the log dir."
+        "--log_name",
+        default="baseline_init",
+        type=str,
+        # required=True,
+        help="Experiment name under the log dir.",
     )
     ## model load
     parser.add_argument(
-        "--model", type=str, choices=["swinunetr", "swinunetr_partial", "our_onehot"]
+        "--model",
+        default="swinunetr_partial",
+        type=str,
+        choices=["swinunetr", "swinunetr_partial", "our_onehot"],
     )
     parser.add_argument(
         "--resume", default=None, help="The path resume from checkpoint"
@@ -366,20 +381,22 @@ def main():
     )
     parser.add_argument(
         "--word_embedding",
-        default="./pretrained_weights/txt_encoding.pth",
+        default="./pretrained_weights/word_embedding_38class.pth",
         help="The path of word embedding",
     )
-    parser.add_argument("--out_nonlinear", type=str, choices=["softmax", "sigmoid"])
-    parser.add_argument("--out_channels", type=int)
+    parser.add_argument(
+        "--out_nonlinear", default="sigmoid", type=str, choices=["softmax", "sigmoid"]
+    )
+    parser.add_argument("--out_channels", default=38, type=int)
     ## hyperparameter
     parser.add_argument(
-        "--max_epoch", default=20, type=int, help="Number of training epoches"
+        "--max_epoch", default=60, type=int, help="Number of training epoches"
     )
     parser.add_argument(
-        "--store_num", default=2, type=int, help="Store model how often"
+        "--store_num", default=5, type=int, help="Store model how often"
     )
     parser.add_argument(
-        "--warmup_epoch", default=5, type=int, help="number of warmup epochs"
+        "--warmup_epoch", default=6, type=int, help="number of warmup epochs"
     )
     parser.add_argument("--lr", default=1e-4, type=float, help="Learning rate")
     parser.add_argument("--weight_decay", default=1e-5, help="Weight Decay")
@@ -393,12 +410,22 @@ def main():
     ### PAOT_10_inner: same with NVIDIA for comparison
     ### PAOT_10: original division
     ### for cross_validation 'cross_validation/PAOT_0' 1 2 3 4
-    parser.add_argument("--data_root_path", default="", help="data root path")
+    parser.add_argument("--data_root_path", default="./data/", help="data root path")
     parser.add_argument(
         "--data_txt_path", default="./dataset/dataset_list/", help="data txt path"
     )
-    parser.add_argument("--train_data_txt_path", type=str, help="train data txt path.")
-    parser.add_argument("--val_data_txt_path", type=str, help="val data txt path.")
+    parser.add_argument(
+        "--train_data_txt_path",
+        default="./dataset/dataset_list/btcv_train_new.txt",
+        type=str,
+        help="train data txt path.",
+    )
+    parser.add_argument(
+        "--val_data_txt_path",
+        default="./dataset/dataset_list/btcv_val_new.txt",
+        type=str,
+        help="val data txt path.",
+    )
     parser.add_argument("--test_data_txt_path", type=str, help="test data txt path.")
     parser.add_argument(
         "--continue_data_txt_path", type=str, help="continue data txt path."
@@ -428,9 +455,9 @@ def main():
     parser.add_argument(
         "--space_z", default=1.5, type=float, help="spacing in z direction"
     )
-    parser.add_argument("--roi_x", default=96, type=int, help="roi size in x direction")
-    parser.add_argument("--roi_y", default=96, type=int, help="roi size in y direction")
-    parser.add_argument("--roi_z", default=96, type=int, help="roi size in z direction")
+    parser.add_argument("--roi_x", default=64, type=int, help="roi size in x direction")
+    parser.add_argument("--roi_y", default=64, type=int, help="roi size in y direction")
+    parser.add_argument("--roi_z", default=64, type=int, help="roi size in z direction")
     parser.add_argument(
         "--num_samples", default=2, type=int, help="sample number in each ct"
     )
@@ -480,9 +507,10 @@ def main():
 
     parser.add_argument(
         "--organ_list",
+        default=[1, 2, 3, 4, 5, 6],
         nargs="+",
         type=int,
-        required=True,
+        # required=True,
         help="Target training organ ids.",
     )
 

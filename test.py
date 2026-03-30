@@ -177,19 +177,19 @@ def main():
                         help='distributed training or not')
     parser.add_argument("--local_rank", type=int)
     parser.add_argument("--device")
-    parser.add_argument("--epoch", default=0)
+    parser.add_argument("--epoch", default=20)
     ## logging
     parser.add_argument('--log_dir', default='output', help='Log directory.')
-    parser.add_argument('--log_name', default='', help='The path resume from checkpoint')
+    parser.add_argument('--log_name', default='initial_train', help='The path resume from checkpoint')
     ## model load
-    parser.add_argument('--model', type=str, choices=['swinunetr', 'swinunetr_partial', 'our_onehot'])
+    parser.add_argument('--model', default='swinunetr_partial', type=str, choices=['swinunetr', 'swinunetr_partial', 'our_onehot'])
     parser.add_argument('--resume', default='', help='The path resume from checkpoint')
     parser.add_argument('--pretrain', default='./pretrained_weights/swin_unetr.base_5000ep_f48_lr2e-4_pretrained.pt', 
                         help='The path of pretrain model')
     parser.add_argument('--trans_encoding', default='word_embedding', 
                         help='the type of encoding: rand_embedding or word_embedding')
-    parser.add_argument('--out_nonlinear', type=str, choices=['softmax', 'sigmoid'])
-    parser.add_argument('--out_channels', type=int)
+    parser.add_argument('--out_nonlinear',default='sigmoid', type=str, choices=['softmax', 'sigmoid'])
+    parser.add_argument('--out_channels', default=38, type=int)
     ## dataset
     parser.add_argument('--dataset_list', nargs='+', default=['PAOT_123457891213', 'PAOT_10_inner']) # 'PAOT', 'felix'
     ### please check this argment carefully
@@ -197,9 +197,9 @@ def main():
     ### PAOT_123457891213: include 1 2 3 4 5 7 8 9 12 13
     ### PAOT_10_inner: same with NVIDIA for comparison
     ### PAOT_10: original division
-    parser.add_argument('--data_root_path', default='', help='data root path')
-    parser.add_argument('--train_data_txt_path', type=str)
-    parser.add_argument('--val_data_txt_path', type=str)
+    parser.add_argument('--data_root_path', default='./data/', help='data root path')
+    parser.add_argument('--train_data_txt_path', default='./dataset/dataset_list/btcv_train_new.txt', type=str)
+    parser.add_argument('--val_data_txt_path', default='./dataset/dataset_list/btcv_val_new.txt', type=str)
     parser.add_argument('--test_data_txt_path', type=str)
     parser.add_argument('--continue_data_txt_path', type=str)
     parser.add_argument('--batch_size', default=1, type=int, help='batch size')
@@ -211,12 +211,12 @@ def main():
     parser.add_argument('--space_x', default=1.5, type=float, help='spacing in x direction')
     parser.add_argument('--space_y', default=1.5, type=float, help='spacing in y direction')
     parser.add_argument('--space_z', default=1.5, type=float, help='spacing in z direction')
-    parser.add_argument('--roi_x', default=96, type=int, help='roi size in x direction')
-    parser.add_argument('--roi_y', default=96, type=int, help='roi size in y direction')
-    parser.add_argument('--roi_z', default=96, type=int, help='roi size in z direction')
+    parser.add_argument('--roi_x', default=64, type=int, help='roi size in x direction')
+    parser.add_argument('--roi_y', default=64, type=int, help='roi size in y direction')
+    parser.add_argument('--roi_z', default=64, type=int, help='roi size in z direction')
     parser.add_argument('--num_samples', default=1, type=int, help='sample number in each ct')
 
-    parser.add_argument('--phase', default='test', help='train or validation or test')
+    parser.add_argument('--phase', default='train', help='train or validation or test')
     parser.add_argument('--cache_dataset', action="store_true", default=False, help='whether use cache dataset')
     parser.add_argument('--cache_rate', default=0.6, type=float, help='The percentage of cached data in total')
     parser.add_argument('--store_result', action="store_true", default=False, help='whether save prediction result')
@@ -224,7 +224,7 @@ def main():
     parser.add_argument('--threshold_organ', default='Pancreas Tumor')
     parser.add_argument('--threshold', default=0.6, type=float)
     
-    parser.add_argument('--organ_list', nargs='+', type=int, required=True, help='Targget class ids for testing.')
+    parser.add_argument('--organ_list',default=[1,2,3,4,5,6], nargs='+', type=int, required=True, help='Targget class ids for testing.')
 
     args = parser.parse_args()
 
