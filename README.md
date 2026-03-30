@@ -5,7 +5,7 @@
 初始训练
 
 ```bash
-uv run python train.py --phase train --data_root_path ./data/ --train_data_txt_path ./dataset/dataset_list/btcv_train_new.txt --val_data_txt_path ./dataset/dataset_list/btcv_val_new.txt --continue_data_txt_path ./dataset/dataset_list/empty_continue.txt --organ_list 1 2 3 4 5 6 --model swinunetr_partial --out_nonlinear sigmoid --out_channels 38 --word_embedding ./pretrained_weights/word_embedding_38class.pth --log_name initial_train --batch_size 1 --roi_x 64 --roi_y 64 --roi_z 64
+uv run python train.py --phase train --data_root_path ./data/ --train_data_txt_path ./dataset/dataset_list/btcv_train_new.txt --val_data_txt_path ./dataset/dataset_list/btcv_val_new.txt --organ_list 1 2 3 4 5 6 --model swinunetr_partial --out_nonlinear sigmoid --out_channels 38 --word_embedding ./pretrained_weights/word_embedding_38class.pth --log_name initial_train --batch_size 1 --roi_x 64 --roi_y 64 --roi_z 64
 ```
 
 生成伪标签：

@@ -12,6 +12,10 @@ from monai.networks.blocks import PatchEmbed, UnetOutBlock, UnetrBasicBlock, Une
 from monai.networks.layers import DropPath, trunc_normal_
 from monai.utils import ensure_tuple_rep, optional_import
 
+import sys
+
+sys.path.append("/home/cjh/workspace/ContinualLearning/model")
+
 rearrange, _ = optional_import("einops", name="rearrange")
 
 
@@ -227,7 +231,7 @@ class SwinUNETR(nn.Module):
         self.bias_nums = [8, 8, 1]
         # self.controller = nn.Conv3d(256+256, sum(self.weight_nums + self.bias_nums), kernel_size=1, stride=1, padding=0)
         if self.encoding == 'rand_embedding':
-            self.organ_embedding = nn.Embedding(out_channels, 256)
+            self.organ_embedding = nn.Embedding(out_channels, 512)
         elif self.encoding == 'word_embedding':
             self.organ_embedding = nn.Parameter(torch.randn(out_channels, 512))
             # self.text_to_vision = nn.Conv3d(768, 512, kernel_size=1, stride=1, padding=0)
@@ -373,7 +377,7 @@ class SwinUNETR(nn.Module):
         print(f"class_num: {self.class_num}")
         # task_encoding torch.Size([31, 256, 1, 1, 1])
 
-        x_feat = self.GAP(dec4)
+        x_feat = self.GAP(dec4) # [1, 256, 1, ,1 ,1]
         b = x_feat.shape[0]
         logits_array = []
 
@@ -1086,3 +1090,15 @@ class SwinTransformer(nn.Module):
         x4 = self.layers4[0](x3.contiguous())
         x4_out = self.proj_out(x4, normalize)
         return [x0_out, x1_out, x2_out, x3_out, x4_out]
+    
+    
+if __name__ == "__main__":
+    model = SwinUNETR(
+        img_size = 64,
+        in_channels = 1,
+        out_channels = 13,
+        feature_size = 48,   
+    )
+    
+    x = torch.randn(1, 1, 64, 64, 64)
+    print(model(x)[-1].shape)

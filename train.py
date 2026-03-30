@@ -51,6 +51,7 @@ class DiceLoss(nn.Module):
 
         for b in range(B):
             for organ in organ_list:
+                # organ - 1，而你的 organ_list 是从 1 开始的，看样子是完全不需要预测背景了，BTCV 的完整 organ_list 是 1 2 3 4 5 6 7 8 9 10 11 12
                 dice_loss = self.dice(predict[b, organ - 1], target[b, organ - 1])
                 total_loss.append(dice_loss)
 
@@ -96,12 +97,17 @@ def train(
     for step, batch in enumerate(epoch_iterator):
         x, y, name = (
             batch["image"].to(args.device),
-            batch["post_label"].float().to(args.device),
+            batch["label"]
+            .float()
+            .to(
+                args.device
+            ),  # 一直都是使用 post_label 做训练，某种程度上不需要 Label 了。或者直接将 post_label 当做 label 算了。
             batch["name"],
         )
         logit_map = model(x)[-1]
 
         if args.out_nonlinear == "sigmoid":
+            # 这里把 organ_list 传进去，大概也就在这几个器官上做损失。
             term_seg_Dice = loss_func_dice.forward(logit_map, y, args.organ_list)
             term_seg_BCE = loss_func_bce.forward(logit_map, y, args.organ_list)
             loss = term_seg_BCE + term_seg_Dice
@@ -224,6 +230,7 @@ def process(args):
     model.load_state_dict(store_dict)
     print("Use pretrained weights")
 
+    # 加载预训练的词向量
     if args.model == "swinunetr_partial" and args.trans_encoding == "word_embedding":
         word_embedding = torch.load(args.word_embedding)
         model.organ_embedding.data = word_embedding.float()
@@ -257,6 +264,7 @@ def process(args):
         optimizer, warmup_epochs=args.warmup_epoch, max_epochs=args.max_epoch
     )
 
+    # 断点训练功能
     if args.resume:
         checkpoint = torch.load(args.resume)
         if args.dist:

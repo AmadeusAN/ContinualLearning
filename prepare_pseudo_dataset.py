@@ -3,7 +3,6 @@ import numpy as np
 import os
 import SimpleITK as sitk
 
-# %%
 felix2paot_label_mapping = {
     1: 8,    # Aorta
     2: 12,    # Adrenal Gland
@@ -31,7 +30,6 @@ felix2paot_label_mapping = {
 paot2felix_label_mapping = {v: k for k, v in felix2paot_label_mapping.items()}
 paot2felix_label_mapping[13] = 2
 
-# %%
 fnames = open('dataset/dataset_list/felix_small_step2_train.txt').readlines()
 fnames = [x.split()[1] for x in fnames]
 fnames = [x.split('/')[-1] for x in fnames]
