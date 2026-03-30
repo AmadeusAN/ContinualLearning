@@ -1,4 +1,14 @@
 # Continual Learning
+## setup
+下面的步骤安装依赖才能适配 149 的环境：
+```bash
+source .venv/bin/activate && uv pip install torch==1.11.0+cu113 torchvision==0.12.0+cu113 torchaudio==0.11.0 --extra-index-url https://download.pytorch.org/whl/cu113
+
+uv pip install monai[all]==0.9.0
+uv pip install -r requirements.txt
+uv pip install numpy==1.23.0
+```
+
 ## Introduction
 如果增量学习仅分两个步骤的话：
 
