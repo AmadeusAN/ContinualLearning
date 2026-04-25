@@ -1,0 +1,71 @@
+## ----------------------- 基本配置 -----------------------
+device: 1
+seed: 42
+## ----------------------- 日志与路径配置 -----------------------
+log:
+  log_dir: "output/STAGE_1"          # 日志保存目录
+  log_name: "tmp_v3"               # 日志名称或备注
+
+## ----------------------- 模型结构配置 -----------------------
+model:
+  # 可选: swinunetr, swinunetr_partial, our_onehot, SwinUNETR_partial_v3_ds, SwinUNETR_partial_v3_de
+  type: "swinunetr_partial"          
+  
+  # 预训练权重/模型恢复路径，这个必填
+  resume: "output/baseline_init/epoch_590.pth"                 
+  
+  # Transformer 编码类型
+  # 可选: rand_embedding (随机初始化), word_embedding (词向量)
+  trans_encoding: "word_embedding" 
+  
+  # 输出层非线性激活函数
+  # 可选: softmax (通常用于单标签/互斥多类), sigmoid (通常用于多标签/独立二类)
+  out_nonlinear: "sigmoid"   
+  
+  # 输出通道数 (类别数)
+  out_channels: 38           
+  
+  # 内部超参数 (对应代码中固定传参的部分)
+  feature_size: 48
+  drop_rate: 0.0
+  attn_drop_rate: 0.0
+  dropout_path_rate: 0.0
+  use_checkpoint: false
+
+## ----------------------- 数据集与预处理 -----------------------
+dataset:
+  data_root_path: "./data/"         # 数据集根目录
+  predict_data_txt_path: "dataset/dataset_list/btcv_train_new.txt"  # 预测数据列表文本路径
+  batch_size: 1              # 推理/训练的批大小
+  num_workers: 8             # 数据加载的线程数
+
+  # 强度缩放 (ScaleIntensityRanged)
+  # 常见于CT图像，例如 -175 到 250 HU 映射到 0.0 到 1.0
+  a_min: -175.0
+  a_max: 250.0
+  b_min: 0.0
+  b_max: 1.0
+
+  # 空间分辨率重采样 (Spacing)
+  space_x: 1.5
+  space_y: 1.5
+  space_z: 1.5
+
+  # 输入模型的 ROI (感兴趣区域) 尺寸
+  roi_x: 64
+  roi_y: 64
+  roi_z: 64
+
+  # 目标器官/类别 ID 列表
+  # 在命令行中通过 --organ_list 1 2 3 传入
+  organ_list: [1, 2, 3, 4, 5, 6]
+
+## ----------------------- 推理配置 -----------------------
+sw_batch_size: 1
+overlap: 0.2
+mode: "constant"
+
+
+## ----------------------- 其他配置 -----------------------
+### logits 保存配置
+save_npz: true

@@ -1,0 +1,57 @@
+# ----------------------- 训练与环境配置 -----------------------
+dist: false                        # 是否开启分布式训练 (True/False)
+local_rank: 0                      # 分布式训练的本地序号
+device: 2                     # 训练设备 (如 cuda 或 cpu)
+epoch: 20                          # 训练总轮数
+phase: "train"                     # 当前运行阶段: train, validation, test
+
+# ----------------------- 日志配置 -----------------------
+log_dir: "output"                  # 日志保存目录
+log_name: "base_init_stage_1_test"          # 日志名称或断点恢复路径名
+
+# ----------------------- 模型配置 -----------------------
+model: "swinunetr_partial"         # 模型选择: [swinunetr, swinunetr_partial, our_onehot]
+resume: "output/baseline_init/epoch_590.pth"                         # 断点恢复路径
+pretrain: "./pretrained_weights/swin_unetr.base_5000ep_f48_lr2e-4_pretrained.pt" # 预训练权重路径
+trans_encoding: "word_embedding"   # 编码类型: rand_embedding, word_embedding
+out_nonlinear: "sigmoid"           # 输出激活函数: [softmax, sigmoid]
+out_channels: 38                   # 输出通道数
+
+# ----------------------- 数据集配置 -----------------------
+dataset_list: ["PAOT_123457891213", "PAOT_10_inner"] # 数据集列表组合
+data_root_path: "./data/"          # 数据根目录
+train_data_txt_path: "./dataset/dataset_list/btcv_train_new.txt" # 训练集列表
+val_data_txt_path: "./dataset/dataset_list/btcv_val_new.txt"     # 验证集列表
+test_data_txt_path: ""             # 测试集列表
+continue_data_txt_path: ""         # 连续训练数据列表
+batch_size: 1                      # 批大小
+num_workers: 8                     # 数据读取线程数
+num_samples: 1                     # 每个CT样本的采样数量
+uniform_sample: false
+
+# ----------------------- 预处理参数 (CT相关) -----------------------
+a_min: -175.0                      # ScaleIntensityRanged 窗口最小值
+a_max: 250.0                       # ScaleIntensityRanged 窗口最大值
+b_min: 0.0                         # 映射后最小值
+b_max: 1.0                         # 映射后最大值
+space_x: 1.5                       # X方向重采样间距
+space_y: 1.5                       # Y方向重采样间距
+space_z: 1.5                       # Z方向重采样间距
+roi_x: 64                          # 模型输入ROI宽
+roi_y: 64                          # 模型输入ROI高
+roi_z: 64                          # 模型输入ROI深
+
+# ----------------------- 缓存与结果控制 -----------------------
+cache_dataset: false               # 是否使用缓存数据集
+cache_rate: 0.6                    # 缓存数据占总数据的比例
+store_result: false                # 是否保存预测结果
+
+# ----------------------- 任务特定参数 -----------------------
+threshold_organ: "Pancreas Tumor"  # 阈值判定的目标器官
+threshold: 0.6                     # 判定阈值
+organ_list: [1, 2, 3, 4, 5, 6]     # 测试的目标类别 ID 列表
+
+# ----------------------- 测试配置 -----------------------
+sw_batch_size: 1
+overlap: 0.2
+mode: "constant"

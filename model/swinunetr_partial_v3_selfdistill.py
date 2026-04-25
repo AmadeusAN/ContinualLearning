@@ -10,7 +10,6 @@ from torch.nn import LayerNorm
 from monai.networks.blocks import MLPBlock as Mlp
 from monai.networks.blocks import (
     PatchEmbed,
-    UnetOutBlock,
     UnetrBasicBlock,
     UnetrUpBlock,
 )
@@ -46,6 +45,7 @@ class SwinUNETR(nn.Module):
         normalize: bool = True,
         use_checkpoint: bool = False,
         spatial_dims: int = 3,
+        distill_dim: int = 256,
         encoding: Union[
             Tuple, str
         ] = "rand_embedding",  ## rand_embedding or word_embedding
@@ -222,6 +222,31 @@ class SwinUNETR(nn.Module):
             res_block=True,
         )
 
+        self.distill_dim = 256  # 常用值，可改成 128/512
+        # encoder 侧 5 个特征的通道数
+        enc_channels = [48, 48, 96, 192, 768]
+        self.enc_projectors = nn.ModuleList(
+            [
+                nn.Conv3d(ch, self.distill_dim, kernel_size=1, bias=False)
+                for ch in enc_channels
+            ]
+        )
+
+        # decoder 侧 6 个特征的通道数（dec4→out）
+        dec_channels = [
+            768,
+            384,
+            192,
+            96,
+            48,
+            48,
+        ]  # 对应 dec4, dec3, dec2, dec1, dec0, out
+        self.dec_projectors = nn.ModuleList(
+            [
+                nn.Conv3d(ch, self.distill_dim, kernel_size=1, bias=False)
+                for ch in dec_channels
+            ]
+        )
         # self.out = UnetOutBlock(spatial_dims=spatial_dims, in_channels=feature_size, out_channels=out_channels)  # type: ignore
 
         self.precls_conv = nn.Sequential(
@@ -359,16 +384,13 @@ class SwinUNETR(nn.Module):
                 x = F.relu(x)
         return x
 
-    def forward(self, x_in, return_feature=False):
+    def forward(self, x_in, return_feature=False, return_for_distill: bool = False):
         hidden_states_out = self.swinViT(x_in, self.normalize)
         enc0 = self.encoder1(x_in)
         enc1 = self.encoder2(hidden_states_out[0])
         enc2 = self.encoder3(hidden_states_out[1])
         enc3 = self.encoder4(hidden_states_out[2])
         dec4 = self.encoder10(hidden_states_out[4])
-        # print(x_in.shape, enc0.shape, enc1.shape, enc2.shape, enc3.shape, dec4.shape)
-        # torch.Size([6, 1, 64, 64, 64]) torch.Size([6, 48, 64, 64, 64]) torch.Size([6, 48, 32, 32, 32])
-        # torch.Size([6, 96, 16, 16, 16]) torch.Size([6, 192, 8,8, 8]) torch.Size([6, 768, 2, 2, 2])
 
         dec3 = self.decoder5(dec4, hidden_states_out[3])
         dec2 = self.decoder4(dec3, enc3)
@@ -421,6 +443,15 @@ class SwinUNETR(nn.Module):
 
         logits_array = torch.cat(logits_array, dim=0)
         # print(out.shape)
+        if return_for_distill:
+            # 返回用于蒸馏的关键特征/输出（可根据需要调整）
+            return {
+                "enc_features": [enc0, enc1, enc2, enc3, dec4],  # encoder 侧
+                "dec_features": [dec4, dec3, dec2, dec1, dec0, out],  # decoder 侧
+                "logits": logits_array,  # 最终预测（用于 soft target）
+                "main_output": logits_array,
+            }
+
         if self.training or return_feature:
             return [
                 enc0,
@@ -1224,4 +1255,5 @@ if __name__ == "__main__":
     )
 
     x = torch.randn(1, 1, 64, 64, 64)
-    print(model(x)[-1].shape)
+    y = model(x, return_for_distill=True)
+    pass

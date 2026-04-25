@@ -1,185 +1,213 @@
 import torch
 from torch import nn
-import torch.nn.functional as F
-import numpy as np
-import matplotlib.pyplot as plt
 from tqdm import tqdm
 import os
-import argparse
-import time
-
+import wandb
+from wandb.sdk.wandb_run import Run
 import warnings
-
-warnings.filterwarnings("ignore")
-
-import torch.distributed as dist
-from torch.nn.parallel import DistributedDataParallel
-from tensorboardX import SummaryWriter
-
-from monai.losses import DiceCELoss
-from monai.inferers import sliding_window_inference
-from monai.data import load_decathlon_datalist, decollate_batch, DistributedSampler
-from monai.transforms import AsDiscrete
-from monai.metrics import DiceMetric
-
-from model.swinunetr import SwinUNETR
+from pathlib import Path
+from monai.inferers import SlidingWindowInferer
+from model.swinunetr import SwinUNETR  # noqa: E402
 from model.swinunetr_partial_onehot import SwinUNETR as SwinUNETR_onehot
 from model.swinunetr_partial_v3 import SwinUNETR as SwinUNETR_partial_v3
+from model.swinunetr_partial_v3_selfdistill import SwinUNETR as SwinUNETR_partial_v3_ds
+from model.swinunetr_partial_v3_de import SwinUNETR as SwinUNETR_partial_v3_de
 from dataset.dataloader_continue import get_loader
-from utils import loss
+from utils.loss import DiceLoss, Multi_BCELoss, SelfDistillationLoss, Multi_MSELoss
+from utils.metrics_ import SegmentationMetrics
+from utils.load_config import load_config, config_to_args
+from utils.best_model_saver import model_param_saver
 from optimizers.lr_scheduler import LinearWarmupCosineAnnealingLR
+import logging
+from torch.amp import autocast, GradScaler
+
+scaler = GradScaler()
+
+log = logging.getLogger(__name__)
 
 
+warnings.filterwarnings("ignore")
 torch.multiprocessing.set_sharing_strategy("file_system")
 
 
-class DiceLoss(nn.Module):
-    def __init__(self, weight=None, ignore_index=None, num_classes=3, **kwargs):
-        super(DiceLoss, self).__init__()
-        self.kwargs = kwargs
-        self.weight = weight
-        self.ignore_index = ignore_index
-        self.num_classes = num_classes
-        self.dice = loss.BinaryDiceLoss(**self.kwargs)
-
-    def forward(self, predict, target, organ_list):
-        total_loss = []
-        predict = F.sigmoid(predict)
-
-        total_loss = []
-        B = predict.shape[0]
-
-        if target.shape[1] == 1:
-            # 需要进行 one-hot 编码
-            target = F.one_hot(target.long().squeeze(1), num_classes=predict.shape[1])
-            target = target.permute(0, 4, 1, 2, 3).contiguous()
-
-        for b in range(B):
-            for organ in organ_list:
-                # organ - 1，而你的 organ_list 是从 1 开始的，看样子是完全不需要预测背景了，BTCV 的完整 organ_list 是 1 2 3 4 5 6 7 8 9 10 11 12
-                dice_loss = self.dice(predict[b, organ - 1], target[b, organ - 1])
-                total_loss.append(dice_loss)
-
-        total_loss = torch.stack(total_loss)
-
-        return total_loss.sum() / total_loss.shape[0]
-
-
-class Multi_BCELoss(nn.Module):
-    def __init__(self, ignore_index=None, num_classes=3, **kwargs):
-        super(Multi_BCELoss, self).__init__()
-        self.kwargs = kwargs
-        self.num_classes = num_classes
-        self.ignore_index = ignore_index
-        self.criterion = nn.BCEWithLogitsLoss()
-
-    def forward(self, predict, target, organ_list):
-        assert predict.shape[2:] == target.shape[2:], (
-            "predict & target shape do not match"
-        )
-        total_loss = []
-        B = predict.shape[0]
-        if target.shape[1] == 1:
-            # 需要进行 one-hot 编码
-            target = F.one_hot(target.long().squeeze(1), num_classes=predict.shape[1])
-            target = target.permute(0, 4, 1, 2, 3).contiguous().float()
-
-        for b in range(B):
-            for organ in organ_list:
-                ce_loss = self.criterion(predict[b, organ - 1], target[b, organ - 1])
-                total_loss.append(ce_loss)
-        total_loss = torch.stack(total_loss)
-
-        return total_loss.sum() / total_loss.shape[0]
-
-
 def train(
-    args, train_loader, model, optimizer, loss_func_dice, loss_func_bce, loss_func_ce
+    args,
+    train_loader,
+    model,
+    optimizer,
+    loss_func_dice,
+    loss_func_bce,
+    loss_func_mse,
+    loss_func_ce,
+    loss_func_ds,
+    wbrun: Run = None,
 ):
     model.train()
     loss_bce_ave = 0
-    loss_ce_ave = 0
+    loss_mse_ave = 0
     loss_dice_ave = 0
+    loss_ds_ave = 0
     epoch_iterator = tqdm(
         train_loader, desc="Training (X / X Steps) (loss=X.X)", dynamic_ncols=True
     )
     for step, batch in enumerate(epoch_iterator):
-        x, y, name = (
+        x, y = (
             batch["image"].to(args.device),
             batch["label"]
             .float()
             .to(
                 args.device
             ),  # 一直都是使用 post_label 做训练，某种程度上不需要 Label 了。或者直接将 post_label 当做 label 算了。
-            batch["name"],
         )
-        logit_map = model(x)[-1]
 
-        if args.out_nonlinear == "sigmoid":
-            # 这里把 organ_list 传进去，大概也就在这几个器官上做损失。
-            term_seg_Dice = loss_func_dice.forward(logit_map, y, args.organ_list)
-            term_seg_BCE = loss_func_bce.forward(logit_map, y, args.organ_list)
-            loss = term_seg_BCE + term_seg_Dice
+        if args.enable_logits_aux:
+            # 之前获取 logits 的时候忘了做 sigmoid 的
+            logits = batch["logits"].to(args.device)
+            logits_list = []
+            for i in range(len(batch["bbox"])):
+                b = batch["bbox"][i]
+                target_logits_patch = logits[
+                    i, :, b[0, 0] : b[0, 1], b[1, 0] : b[1, 1], b[2, 0] : b[2, 1]
+                ]
+                logits_list.append(target_logits_patch)
+            logits = torch.stack(logits_list)
+
+        optimizer.zero_grad()
+        with autocast(device_type="cuda", enabled=True):
+            log.debug("computing with cross entropy loss...")
+            if args.enable_ds:
+                log.debug("computing with self distillation loss...")
+                output_dict = model(x, return_for_distill=True)
+                logit_map = output_dict["logits"]
+            else:
+                logit_map = model(x)[-1]
+
+            if args.out_nonlinear == "sigmoid":
+                # 这里把 organ_list 传进去，大概也就在这几个器官上做损失。
+                term_seg_Dice = loss_func_dice.forward(logit_map, y, args.organ_list)
+                term_seg_BCE = loss_func_bce.forward(logit_map, y, args.organ_list)
+
+                term_seg_MSE = (
+                    loss_func_mse.forward(
+                        logit_map, logits, args.organ_list, args.last_stage_organ_list
+                    )
+                    if args.enable_logits_aux
+                    else torch.tensor(0.0, device=args.device)
+                )
+
+                dist_loss = (
+                    loss_func_ds(output_dict)
+                    if args.enable_ds
+                    else torch.tensor(0.0, device=args.device)
+                )
+
+                loss = (
+                    args.bce_weight * term_seg_BCE
+                    + term_seg_Dice
+                    + dist_loss
+                    + term_seg_MSE
+                )
+
             loss_bce_ave += term_seg_BCE.item()
+            loss_mse_ave += term_seg_MSE.item()
             loss_dice_ave += term_seg_Dice.item()
+            loss_ds_ave += dist_loss.item()
             epoch_iterator.set_description(
-                "Epoch=%d: Training (%d / %d Steps) (dice_loss=%2.5f, bce_loss=%2.5f)"
+                "Epoch=%d: Training (%d / %d Steps) (dice_loss=%2.5f, bce_loss=%2.5f, mse_loss=%2.5f, ds_loss=%2.5f)"
                 % (
                     args.epoch,
                     step,
                     len(train_loader),
                     term_seg_Dice.item(),
                     term_seg_BCE.item(),
-                )
-            )
-        elif args.out_nonlinear == "softmax":
-            b, c, d, h, w = y.shape
-            label = y.new_zeros((b, d, h, w), dtype=torch.long)
-            for icls in args.organ_list:
-                label[y[:, icls - 1] == 1] = icls
-            term_seg_Dice = loss_func_dice.forward(logit_map[:, 1:], y, args.organ_list)
-            term_seg_CE = loss_func_ce(logit_map, label)
-            loss = term_seg_Dice + term_seg_CE
-            loss_ce_ave += term_seg_CE.item()
-            loss_dice_ave += term_seg_Dice.item()
-            epoch_iterator.set_description(
-                "Epoch=%d: Training (%d / %d Steps) (dice_loss=%2.5f, ce_loss=%2.5f)"
-                % (
-                    args.epoch,
-                    step,
-                    len(train_loader),
-                    term_seg_Dice.item(),
-                    term_seg_CE.item(),
+                    term_seg_MSE.item(),
+                    dist_loss.item(),
                 )
             )
 
-        loss.backward()
-        optimizer.step()
-        optimizer.zero_grad()
+            # elif args.out_nonlinear == "softmax":
+            #     b, c, d, h, w = y.shape
+            #     label = y.new_zeros((b, d, h, w), dtype=torch.long)
+            #     for icls in args.organ_list:
+            #         label[y[:, icls - 1] == 1] = icls
+            #     term_seg_Dice = loss_func_dice.forward(logit_map[:, 1:], y, args.organ_list)
+            #     term_seg_CE = loss_func_ce(logit_map, label)
+            #     loss = term_seg_Dice + term_seg_CE
+            #     loss_mse_ave += term_seg_MSE.item()
+            #     loss_ce_ave += term_seg_CE.item()
+            #     loss_dice_ave += term_seg_Dice.item()
+            #     epoch_iterator.set_description(
+            #         "Epoch=%d: Training (%d / %d Steps) (dice_loss=%2.5f, ce_loss=%2.5f, mse_loss=%2.5f)"
+            #         % (
+            #             args.epoch,
+            #             step,
+            #             len(train_loader),
+            #             term_seg_Dice.item(),
+            #             term_seg_MSE.item(),
+            #             term_seg_CE.item(),
+            #         )
+            #     )
+
+        # loss.backward()
+        # optimizer.step()
+        # torch.cuda.empty_cache()
+        scaler.scale(loss).backward()
+        scaler.step(optimizer)
+        scaler.update()
         torch.cuda.empty_cache()
     print(
-        "Epoch=%d: ave_dice_loss=%2.5f, ave_bce_loss=%2.5f"
+        "Epoch=%d: ave_dice_loss=%2.5f, ave_bce_loss=%2.5f, ave_mse_loss=%2.5f, ave_ds_loss=%2.5f"
         % (
             args.epoch,
             loss_dice_ave / len(epoch_iterator),
             loss_bce_ave / len(epoch_iterator),
+            loss_mse_ave / len(epoch_iterator),
+            loss_ds_ave / len(epoch_iterator),
         )
     )
 
     return (
         loss_dice_ave / len(epoch_iterator),
         loss_bce_ave / len(epoch_iterator),
-        loss_ce_ave / len(epoch_iterator),
+        loss_mse_ave / len(epoch_iterator),
+        loss_ds_ave / len(epoch_iterator),
     )
 
 
-def process(args):
-    rank = 0
+def evaluate(
+    args,
+    val_loader,
+    infer,
+    model,
+    metrics,
+    wbrun: Run = None,
+    saver: model_param_saver = None,
+):
+    assert args.out_nonlinear == "sigmoid", "Only support sigmoid"
+    model.eval()
+    metrics.reset()
 
-    if args.dist:
-        dist.init_process_group(backend="nccl", init_method="env://")
-        rank = args.local_rank
-    args.device = torch.device(f"cuda:{rank}")
+    with torch.no_grad():
+        for step, batch in tqdm(enumerate(val_loader), desc="evaluating"):
+            logits = infer(batch["image"].to(args.device), model)
+
+            spacing = [args.space_x, args.space_y, args.space_z]
+            metrics.update(
+                logits, batch["label"].float().cpu(), args.organ_list, spacing
+            )
+    summary = metrics.compute()
+
+    # check and replace bast model
+    saver.check(
+        model=model,
+        metrics=summary,
+    )
+
+    return summary
+
+
+def process(args, wbrun: Run = None):
+
     torch.cuda.set_device(args.device)
 
     # prepare the 3D model
@@ -218,26 +246,56 @@ def process(args):
             use_checkpoint=False,
             encoding=args.trans_encoding,
         )
+    elif args.model == "SwinUNETR_partial_v3_ds":
+        model = SwinUNETR_partial_v3_ds(
+            img_size=(args.roi_x, args.roi_y, args.roi_z),
+            in_channels=1,
+            out_channels=args.out_channels,
+            feature_size=48,
+            drop_rate=0.0,
+            attn_drop_rate=0.0,
+            dropout_path_rate=0.0,
+            encoding=args.trans_encoding,
+            use_checkpoint=True,
+        )
+        log.debug("load distiall model")
+    elif args.model == "SwinUNETR_partial_v3_de":
+        model = SwinUNETR_partial_v3_de(
+            img_size=(args.roi_x, args.roi_y, args.roi_z),
+            in_channels=1,
+            out_channels=args.out_channels,
+            feature_size=48,
+            drop_rate=0.0,
+            attn_drop_rate=0.0,
+            dropout_path_rate=0.0,
+            encoding=args.trans_encoding,
+            use_checkpoint=True,
+            use_bypass=True,
+            freq_alpha=0.015,
+        )
+        log.debug("load de model")
 
     # Load pre-trained weights
     store_dict = model.state_dict()
-    pretrain_checkpoint = torch.load(args.pretrain)
-    if "state_dict" in pretrain_checkpoint:
-        model_dict = pretrain_checkpoint["state_dict"]
-    else:
-        model_dict = pretrain_checkpoint["net"]
-    torch.nn.modules.utils.consume_prefix_in_state_dict_if_present(
-        model_dict, "module."
-    )
+    if args.pretrain:
+        pretrain_checkpoint = torch.load(args.pretrain)
 
-    for key in model_dict.keys():
-        if "out" not in key:
-            store_dict[key] = model_dict[key]
+        if "state_dict" in pretrain_checkpoint:
+            model_dict = pretrain_checkpoint["state_dict"]
         else:
-            print(f"{key} is not in model state dict")
+            model_dict = pretrain_checkpoint["net"]
+        torch.nn.modules.utils.consume_prefix_in_state_dict_if_present(
+            model_dict, "module."
+        )
 
-    model.load_state_dict(store_dict)
-    print("Use pretrained weights")
+        for key in model_dict.keys():
+            if "out" not in key:
+                store_dict[key] = model_dict[key]
+            else:
+                print(f"{key} is not in model state dict")
+
+        model.load_state_dict(store_dict)
+        print("Use pretrained weights")
 
     # 加载预训练的词向量
     if args.model == "swinunetr_partial" and args.trans_encoding == "word_embedding":
@@ -246,16 +304,36 @@ def process(args):
         print("load word embedding")
     model.to(args.device)
     model.train()
-    if args.dist:
-        model = DistributedDataParallel(model, device_ids=[args.device])
+
+    # create inferer
+    infer = SlidingWindowInferer(
+        roi_size=(args.roi_x, args.roi_y, args.roi_z),
+        sw_batch_size=args.sw_batch_size,
+        overlap=args.overlap,
+        mode=args.mode,
+        sw_device=args.device,
+        buffer_steps=4,
+        device="cpu",  # 结果拼接在 cpu 中，防止爆显存
+    )
 
     # criterion and optimizer
     # loss_function = DiceCELoss(to_onehot_y=True, softmax=True)
     loss_func_dice = DiceLoss().to(args.device)
     loss_func_bce = Multi_BCELoss().to(args.device)
+    loss_func_mse = Multi_MSELoss().to(args.device)
     loss_func_ce = nn.CrossEntropyLoss()
+    loss_func_ds = SelfDistillationLoss(model, args, lambda_distill=args.distill_weight)
+    metrics = SegmentationMetrics(num_classes=args.out_channels, metrics=["dc"])
+    saver = model_param_saver(
+        save_dir=Path(args.log_dir) / args.log_name, monitor_metric=args.monitor_metric
+    )
 
-    if args.model in ["swinunetr_partial", "our_onehot"]:
+    if args.model in [
+        "swinunetr_partial",
+        "our_onehot",
+        "SwinUNETR_partial_v3_ds",
+        "SwinUNETR_partial_v3_de",
+    ]:
         optimizer = torch.optim.AdamW(
             model.parameters(), lr=args.lr, weight_decay=args.weight_decay
         )
@@ -280,8 +358,8 @@ def process(args):
         else:
             store_dict = model.state_dict()
             model_dict = checkpoint["net"]
-            for key in model_dict.keys():
-                store_dict[".".join(key.split(".")[1:])] = model_dict[key]
+            # for key in model_dict.keys():
+            #     store_dict[".".join(key.split(".")[1:])] = model_dict[key]
             model.load_state_dict(store_dict)
 
         optimizer.load_state_dict(checkpoint["optimizer"])
@@ -290,39 +368,38 @@ def process(args):
 
         print("success resume from ", args.resume)
 
-    torch.backends.cudnn.benchmark = True
-
-    train_loader, train_sampler = get_loader(args)
-
-    if rank == 0:
-        writer = SummaryWriter(log_dir=os.path.join(args.log_dir, args.log_name))
-        print("Writing Tensorboard logs to ", os.path.join(args.log_dir, args.log_name))
+    # training should use both train_loader and val_laoder
+    train_loader, val_loader, _ = get_loader(args)
 
     if not os.path.isdir(os.path.join(args.log_dir, args.log_name)):
         os.mkdir(os.path.join(args.log_dir, args.log_name))
 
     while args.epoch < args.max_epoch:
-        if args.dist:
-            dist.barrier()
-            train_sampler.set_epoch(args.epoch)
         scheduler.step()
 
-        loss_dice, loss_bce, loss_ce = train(
+        loss_dice, loss_bce, loss_mse, loss_ds = train(
             args,
             train_loader,
             model,
             optimizer,
             loss_func_dice,
             loss_func_bce,
+            loss_func_mse,
             loss_func_ce,
+            loss_func_ds,
         )
-        if rank == 0:
-            writer.add_scalar("train_dice_loss", loss_dice, args.epoch)
-            writer.add_scalar("train_bce_loss", loss_bce, args.epoch)
-            writer.add_scalar("train_ce_loss", loss_ce, args.epoch)
-            # writer.add_scalar('lr', scheduler.get_lr(), args.epoch)
 
-        if (args.epoch % args.store_num == 0 and args.epoch != 0) and rank == 0:
+        wbrun.log(
+            {
+                "train_dice_loss": loss_dice,
+                "train_bce_loss": loss_bce,
+                "train_mse_loss": loss_mse,
+                "train_ds_loss": loss_ds,
+            },
+            step=args.epoch,
+        )
+
+        if args.epoch % args.store_num == 0 and args.epoch != 0:
             checkpoint = {
                 "net": model.state_dict(),
                 "optimizer": optimizer.state_dict(),
@@ -335,188 +412,33 @@ def process(args):
             )
             print("save model success")
 
+        if args.epoch % args.eval_interval == 0:
+            eval_metrics = evaluate(
+                args,
+                val_loader,
+                infer,
+                model,
+                metrics,
+                wbrun,
+                saver,
+            )
+
+            wbrun.log(eval_metrics, step=args.epoch)
+
         args.epoch += 1
 
-    if args.dist:
-        dist.destroy_process_group()
 
+def main(log_name: str = None):
+    args = config_to_args(config=load_config("config_stage_2.yaml"))
 
-def main():
-    parser = argparse.ArgumentParser()
-    ## for distributed training
-    parser.add_argument(
-        "--dist", default=False, action="store_true", help="distributed training or not"
-    )
-    parser.add_argument("--local_rank", type=int)
-    parser.add_argument("--device")
-    parser.add_argument("--epoch", default=0)
-    ## logging
-    parser.add_argument("--log_dir", default="output", help="Log directory.")
-    parser.add_argument(
-        "--log_name",
-        default="baseline_init",
-        type=str,
-        # required=True,
-        help="Experiment name under the log dir.",
-    )
-    ## model load
-    parser.add_argument(
-        "--model",
-        default="swinunetr_partial",
-        type=str,
-        choices=["swinunetr", "swinunetr_partial", "our_onehot"],
-    )
-    parser.add_argument(
-        "--resume", default=None, help="The path resume from checkpoint"
-    )
-    parser.add_argument(
-        "--pretrain",
-        default="./pretrained_weights/swin_unetr.base_5000ep_f48_lr2e-4_pretrained.pt",
-        help="The path of pretrain model",
-    )
-    parser.add_argument(
-        "--trans_encoding",
-        default="word_embedding",
-        help="the type of encoding: rand_embedding or word_embedding",
-    )
-    parser.add_argument(
-        "--word_embedding",
-        default="./pretrained_weights/word_embedding_38class.pth",
-        help="The path of word embedding",
-    )
-    parser.add_argument(
-        "--out_nonlinear", default="sigmoid", type=str, choices=["softmax", "sigmoid"]
-    )
-    parser.add_argument("--out_channels", default=38, type=int)
-    ## hyperparameter
-    parser.add_argument(
-        "--max_epoch", default=60, type=int, help="Number of training epoches"
-    )
-    parser.add_argument(
-        "--store_num", default=5, type=int, help="Store model how often"
-    )
-    parser.add_argument(
-        "--warmup_epoch", default=6, type=int, help="number of warmup epochs"
-    )
-    parser.add_argument("--lr", default=1e-4, type=float, help="Learning rate")
-    parser.add_argument("--weight_decay", default=1e-5, help="Weight Decay")
-    ## dataset
-    parser.add_argument(
-        "--dataset_list", nargs="+", default=["PAOT_123457891213", "PAOT_10_inner"]
-    )  # 'PAOT', 'felix'
-    ### please check this argment carefully
-    ### PAOT: include PAOT_123457891213 and PAOT_10
-    ### PAOT_123457891213: include 1 2 3 4 5 7 8 9 12 13
-    ### PAOT_10_inner: same with NVIDIA for comparison
-    ### PAOT_10: original division
-    ### for cross_validation 'cross_validation/PAOT_0' 1 2 3 4
-    parser.add_argument("--data_root_path", default="./data/", help="data root path")
-    parser.add_argument(
-        "--data_txt_path", default="./dataset/dataset_list/", help="data txt path"
-    )
-    parser.add_argument(
-        "--train_data_txt_path",
-        default="./dataset/dataset_list/btcv_train_new.txt",
-        type=str,
-        help="train data txt path.",
-    )
-    parser.add_argument(
-        "--val_data_txt_path",
-        default="./dataset/dataset_list/btcv_val_new.txt",
-        type=str,
-        help="val data txt path.",
-    )
-    parser.add_argument("--test_data_txt_path", type=str, help="test data txt path.")
-    parser.add_argument(
-        "--continue_data_txt_path", type=str, help="continue data txt path."
-    )
-    parser.add_argument("--batch_size", default=1, type=int, help="batch size")
-    parser.add_argument(
-        "--num_workers", default=8, type=int, help="workers numebr for DataLoader"
-    )
-    parser.add_argument(
-        "--a_min", default=-175, type=float, help="a_min in ScaleIntensityRanged"
-    )
-    parser.add_argument(
-        "--a_max", default=250, type=float, help="a_max in ScaleIntensityRanged"
-    )
-    parser.add_argument(
-        "--b_min", default=0.0, type=float, help="b_min in ScaleIntensityRanged"
-    )
-    parser.add_argument(
-        "--b_max", default=1.0, type=float, help="b_max in ScaleIntensityRanged"
-    )
-    parser.add_argument(
-        "--space_x", default=1.5, type=float, help="spacing in x direction"
-    )
-    parser.add_argument(
-        "--space_y", default=1.5, type=float, help="spacing in y direction"
-    )
-    parser.add_argument(
-        "--space_z", default=1.5, type=float, help="spacing in z direction"
-    )
-    parser.add_argument("--roi_x", default=64, type=int, help="roi size in x direction")
-    parser.add_argument("--roi_y", default=64, type=int, help="roi size in y direction")
-    parser.add_argument("--roi_z", default=64, type=int, help="roi size in z direction")
-    parser.add_argument(
-        "--num_samples", default=2, type=int, help="sample number in each ct"
-    )
+    args.log_name = log_name if log_name else args.log_name
 
-    parser.add_argument("--phase", default="train", help="train or validation or test")
-    parser.add_argument(
-        "--uniform_sample",
-        action="store_true",
-        default=False,
-        help="whether utilize uniform sample strategy",
-    )
-    parser.add_argument(
-        "--datasetkey",
-        nargs="+",
-        default=[
-            "01",
-            "02",
-            "03",
-            "04",
-            "05",
-            "07",
-            "08",
-            "09",
-            "12",
-            "13",
-            "10_03",
-            "10_06",
-            "10_07",
-            "10_08",
-            "10_09",
-            "10_10",
-        ],
-        help="the content for ",
-    )
-    parser.add_argument(
-        "--cache_dataset",
-        action="store_true",
-        default=False,
-        help="whether use cache dataset",
-    )
-    parser.add_argument(
-        "--cache_rate",
-        default=0.005,
-        type=float,
-        help="The percentage of cached data in total",
-    )
+    with wandb.init(
+        project="continue_learning", config=args, name=args.log_name
+    ) as run:
+        process(args=args, wbrun=run)
 
-    parser.add_argument(
-        "--organ_list",
-        default=[1, 2, 3, 4, 5, 6],
-        nargs="+",
-        type=int,
-        # required=True,
-        help="Target training organ ids.",
-    )
-
-    args = parser.parse_args()
-
-    process(args=args)
+    return args
 
 
 if __name__ == "__main__":

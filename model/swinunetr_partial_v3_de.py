@@ -4,13 +4,13 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.fft as fft
 import torch.utils.checkpoint as checkpoint
 from torch.nn import LayerNorm
 
 from monai.networks.blocks import MLPBlock as Mlp
 from monai.networks.blocks import (
     PatchEmbed,
-    UnetOutBlock,
     UnetrBasicBlock,
     UnetrUpBlock,
 )
@@ -22,6 +22,77 @@ import sys
 sys.path.append("/home/cjh/workspace/ContinualLearning/model")
 
 rearrange, _ = optional_import("einops", name="rearrange")
+
+
+# ====================== 新增：频率解耦模块 ======================
+class FrequencyDecoupling(nn.Module):
+    """论文 ELCFS 频率解耦思想：分离低频风格（幅度谱）与高频语义（相位+高频）"""
+
+    def __init__(
+        self, alpha: float = 0.015
+    ):  # α 控制低频区域比例（论文建议 0.01~0.015）
+        super().__init__()
+        self.alpha = alpha
+
+    def forward(self, x: torch.Tensor):  # x: [B, 1, D, H, W]
+        # 3D FFT
+        x_freq = fft.fftshift(fft.fftn(x, dim=(-3, -2, -1)))
+        amp = torch.abs(x_freq)  # 低级风格/域差异（幅度谱）
+        phase = torch.angle(x_freq)  # 高级语义（相位谱）
+
+        # 低频掩码（中心低频区域）
+        D, H, W = x.shape[-3:]
+        mask = torch.zeros_like(amp)
+        cz = D // 2
+        cy = H // 2
+        cx = W // 2
+        r = int(self.alpha * min(D, H, W) // 2)
+        mask[..., cz - r : cz + r, cy - r : cy + r, cx - r : cx + r] = 1
+
+        low_freq = amp * mask  # 低频风格分支（送 bypass）
+        high_freq = amp * (1 - mask) + phase * 1j  # 高频 + 相位（语义分支）
+
+        # 重构高频语义图像（送主路径）
+        high_recon = torch.real(fft.ifftn(fft.ifftshift(high_freq), dim=(-3, -2, -1)))
+        return high_recon, low_freq  # high_recon: 主路径, low_freq: 旁路
+
+
+# ====================== 新增：旁路辅助分支 ======================
+class BypassAuxBranch(nn.Module):
+    """旁路分支：处理低频风格信息，通过注意力与主特征融合（辅助器官边界不变性）"""
+
+    def __init__(self, main_channels: int):
+        super().__init__()
+        style_channels = main_channels
+        self.style_encoder = nn.Conv3d(1, style_channels, kernel_size=3, padding=1)
+        self.attn = nn.MultiheadAttention(
+            embed_dim=main_channels, num_heads=8, batch_first=True
+        )
+        self.proj = nn.Conv3d(style_channels, main_channels, kernel_size=1)
+        self.norm = nn.GroupNorm(8, main_channels)
+
+    def forward(self, main_feat: torch.Tensor, low_freq: torch.Tensor):
+        # low_freq: [B, 1, D', H', W'] （可能需要插值到 main_feat 尺寸）
+        if low_freq.shape[-3:] != main_feat.shape[-3:]:
+            low_freq = F.interpolate(
+                low_freq,
+                size=main_feat.shape[-3:],
+                mode="trilinear",
+                align_corners=False,
+            )
+
+        style_feat = self.style_encoder(low_freq)  # [B, 32, ...]
+
+        # 注意力融合（全局建模风格对语义的影响）
+        B, C, D, H, W = main_feat.shape
+        main_flat = main_feat.flatten(2).permute(0, 2, 1)  # [B, N, C]
+        style_flat = style_feat.flatten(2).permute(0, 2, 1)  # [B, N, 32]
+
+        fused, _ = self.attn(main_flat, style_flat, style_flat)  # 注意力
+        fused = fused.permute(0, 2, 1).view(B, C, D, H, W)
+
+        fused = self.proj(fused)
+        return main_feat + self.norm(fused)
 
 
 class SwinUNETR(nn.Module):
@@ -46,6 +117,9 @@ class SwinUNETR(nn.Module):
         normalize: bool = True,
         use_checkpoint: bool = False,
         spatial_dims: int = 3,
+        # new params
+        use_bypass: bool = True,
+        freq_alpha: float = 0.015,
         encoding: Union[
             Tuple, str
         ] = "rand_embedding",  ## rand_embedding or word_embedding
@@ -77,6 +151,10 @@ class SwinUNETR(nn.Module):
         super().__init__()
 
         self.encoding = encoding
+        self.use_bypass = use_bypass
+
+        # ==================== 新增：频率解耦 ====================
+        self.freq_decouple = FrequencyDecoupling(alpha=freq_alpha)
 
         img_size = ensure_tuple_rep(img_size, spatial_dims)
         patch_size = ensure_tuple_rep(2, spatial_dims)
@@ -224,6 +302,18 @@ class SwinUNETR(nn.Module):
 
         # self.out = UnetOutBlock(spatial_dims=spatial_dims, in_channels=feature_size, out_channels=out_channels)  # type: ignore
 
+        # ==================== 新增：旁路分支（插入 5 个关键位置） ====================
+        if self.use_bypass:
+            self.bypass_enc1 = BypassAuxBranch(main_channels=feature_size)
+            self.bypass_enc2 = BypassAuxBranch(main_channels=feature_size * 2)
+            self.bypass_enc3 = BypassAuxBranch(main_channels=feature_size * 4)
+            self.bypass_enc4 = BypassAuxBranch(
+                main_channels=feature_size * 8
+            )  # 注意 encoder4 输出是 4*feature_size
+            self.bypass_bottleneck = BypassAuxBranch(
+                main_channels=feature_size * 16
+            )  # dec4 前
+
         self.precls_conv = nn.Sequential(
             nn.GroupNorm(16, 48), nn.ReLU(inplace=True), nn.Conv3d(48, 8, kernel_size=1)
         )
@@ -360,7 +450,13 @@ class SwinUNETR(nn.Module):
         return x
 
     def forward(self, x_in, return_feature=False):
-        hidden_states_out = self.swinViT(x_in, self.normalize)
+
+        # ==================== 新增：频率解耦（最前端） ====================
+        high_recon, low_freq = self.freq_decouple(
+            x_in
+        )  # high_recon: 语义主路径, low_freq: 风格旁路
+        # ==================== 主路径（只用 high_recon） ====================
+        hidden_states_out = self.swinViT(high_recon, self.normalize)
         enc0 = self.encoder1(x_in)
         enc1 = self.encoder2(hidden_states_out[0])
         enc2 = self.encoder3(hidden_states_out[1])
@@ -369,6 +465,14 @@ class SwinUNETR(nn.Module):
         # print(x_in.shape, enc0.shape, enc1.shape, enc2.shape, enc3.shape, dec4.shape)
         # torch.Size([6, 1, 64, 64, 64]) torch.Size([6, 48, 64, 64, 64]) torch.Size([6, 48, 32, 32, 32])
         # torch.Size([6, 96, 16, 16, 16]) torch.Size([6, 192, 8,8, 8]) torch.Size([6, 768, 2, 2, 2])
+
+        # ==================== 新增：旁路融合（关键中间层） ====================
+        if self.use_bypass:
+            # close early layer bypass due to memory consumption
+            # enc1 = self.bypass_enc1(enc1, low_freq)  # 低频风格辅助 enc1
+            # enc2 = self.bypass_enc2(enc2, low_freq)
+            enc3 = self.bypass_enc3(enc3, low_freq)
+            dec4 = self.bypass_bottleneck(dec4, low_freq)  # bottleneck 辅助
 
         dec3 = self.decoder5(dec4, hidden_states_out[3])
         dec2 = self.decoder4(dec3, enc3)

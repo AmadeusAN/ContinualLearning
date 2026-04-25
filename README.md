@@ -1,6 +1,16 @@
 # Continual Learning
 ## setup
 下面的步骤安装依赖才能适配 149 的环境：
+> [!warning]
+> 还是算了，适配性太差，而且训练速度太慢
+>
+> 不如自己手动更新环境。
+>
+> 全部基于 python 3.9.23 版本，然后正常使用 uv 安装依赖即可。
+
+
+下面这个方法安装的旧环境在 `raw_venv`
+
 ```bash
 source .venv/bin/activate && uv pip install torch==1.11.0+cu113 torchvision==0.12.0+cu113 torchaudio==0.11.0 --extra-index-url https://download.pytorch.org/whl/cu113
 
@@ -10,15 +20,26 @@ uv pip install numpy==1.23.0
 ```
 
 ## Introduction
+
 如果增量学习仅分两个步骤的话：
 
 初始训练
 
 ```bash
-uv run python train.py --phase train --data_root_path ./data/ --train_data_txt_path ./dataset/dataset_list/btcv_train_new.txt --val_data_txt_path ./dataset/dataset_list/btcv_val_new.txt --organ_list 1 2 3 4 5 6 --model swinunetr_partial --out_nonlinear sigmoid --out_channels 38 --word_embedding ./pretrained_weights/word_embedding_38class.pth --log_name initial_train --batch_size 1 --roi_x 64 --roi_y 64 --roi_z 64
+uv run train.py
 ```
 
-生成伪标签：
+> [!important]
+> 现在环境配置已经迁移到 `config.yaml` 中了，不需要在命令行手动敲
+
+生成伪标签，也是使用
+
+```bash
+source ...
+python predict.py
+```
+
+
 
 ```bash
 python predict.py --log_name initial_train --resume ./output/initial_train/epoch_100.pth --data_root_path ./data --predict_data_txt_path ./dataset/dataset_list/btcv_train_new.txt --organ_list 1 2 3 4 5 6 7 8 --model swinunetr_partial --out_nonlinear sigmoid --out_channels 38
@@ -30,6 +51,16 @@ python predict.py --log_name initial_train --resume ./output/initial_train/epoch
 python train.py --phase continue --data_root_path ./data --continue_data_txt_path ./dataset/dataset_list/btcv_continue_train.txt --organ_list 1 2 3 4 5 6 7 8 --model swinunetr_partial --out_nonlinear sigmoid --out_channels 38 --pretrain ./output/initial_train/epoch_100.pth --log_name continue_train
 ```
 
+
+## Experiment
+### baseline_init
+使用作者特制的 swinunetr + 分割头，跑基本的 baseline，inti 表示仅进行了第一个初始训练阶段
+
+### baseline_cfsi
+尝试使用 cfsi 进行数据增强，不过效果不是很好，大概是合成的样本太差了吧。
+
+### predict_v2 和 btcv_train_new_stage_2_v2.txt
+在生成伪标签的同时，额外使用 logits 进行知识蒸馏
 
 
 ## Paper

@@ -338,3 +338,6 @@
  30-03-2026 20:17:39:167 [pid=3594799 tid=3594799] NOTICE  cufio-drv:727 running in compatible mode
  30-03-2026 20:19:28:152 [pid=3598319 tid=3598319] NOTICE  cufio-drv:727 running in compatible mode
  30-03-2026 20:22:49:966 [pid=3606444 tid=3606444] NOTICE  cufio-drv:727 running in compatible mode
+ 31-03-2026 10:25:04:83 [pid=3818176 tid=3818176] NOTICE  cufio-drv:727 running in compatible mode
+ 02-04-2026 09:49:41:283 [pid=4172903 tid=4172903] NOTICE  cufio-drv:727 running in compatible mode
+ 02-04-2026 10:11:03:305 [pid=4177243 tid=4177243] NOTICE  cufio-drv:727 running in compatible mode

@@ -1,0 +1,138 @@
+# Distributed Training
+dist: false
+local_rank: null
+device: 1
+epoch: 0
+seed: 42
+
+# Logging
+log_dir: "output"
+log_name: "baseline_init_stage_2_v2" # 同时也是 wandb 的 run name
+
+# Model
+# swinunetr, swinunetr_partial, our_onehot, SwinUNETR_partial_v3_ds, SwinUNETR_partial_v3_de
+model: "swinunetr_partial"
+
+resume:  # checkpoint to resume
+pretrain: "output/baseline_init/epoch_590.pth" # pretrained weight
+trans_encoding: "word_embedding" # rand_embedding or word_embedding
+word_embedding: "./pretrained_weights/word_embedding_38class.pth"
+out_nonlinear: "sigmoid" # softmax, sigmoid
+out_channels: 38
+
+# Inferer
+sw_batch_size: 1
+overlap: 0.2
+mode: "constant"
+
+# loss weight
+bce_weight: 1 # 1
+distill_weight: 0.3 # 自蒸馏损失，如果启动了自蒸馏的话
+distill_dim: 256 # U-net 结构使用 feature-level self-distill 需要进行通道数对齐
+
+# Hyperparameters
+max_epoch: 600
+store_num: 10
+warmup_epoch: 60
+lr: 1.0e-4
+weight_decay: 1.0e-5
+eval_interval: 20 # evaluate model every 10 epochs
+monitor_metric: "dc"
+use_amp: true
+
+# Dataset
+dataset_list:
+  - "PAOT_123457891213"
+  - "PAOT_10_inner"
+data_root_path: "./data/"
+data_txt_path: "./dataset/dataset_list/"
+
+# 用于进行 cfsi 的数据集
+# train_data_txt_path: "./dataset/dataset_list/btcv_train_cfsi.txt"
+# val_data_txt_path: "./dataset/dataset_list/btcv_val_new.txt"
+
+train_data_txt_path: "./dataset/dataset_list/btcv_train_new_stage_2_v2.txt"
+val_data_txt_path: "./dataset/dataset_list/btcv_val_new.txt"
+
+test_data_txt_path: null
+continue_data_txt_path: null
+batch_size: 1
+num_workers: 8
+
+# ScaleIntensityRanged
+a_min: -175.0
+a_max: 250.0
+b_min: 0.0
+b_max: 1.0
+
+# Spacing
+space_x: 1.5
+space_y: 1.5
+space_z: 1.5
+
+# ROI Size
+roi_x: 64
+roi_y: 64
+roi_z: 64
+
+# Sampling
+num_samples: 2
+
+# Phase
+phase: "train"
+uniform_sample: false
+
+# Dataset Keys
+datasetkey:
+  - "01"
+  - "02"
+  - "03"
+  - "04"
+  - "05"
+  - "07"
+  - "08"
+  - "09"
+  - "12"
+  - "13"
+  - "10_03"
+  - "10_06"
+  - "10_07"
+  - "10_08"
+  - "10_09"
+  - "10_10"
+
+# Cache
+cache_dataset: false
+cache_rate: 0.005
+
+# Organ List
+organ_list:
+  - 1
+  - 2
+  - 3
+  - 4
+  - 5
+  - 6
+  - 7
+  - 8
+  - 9
+  - 10
+  - 11
+  - 12
+  - 13
+
+last_stage_organ_list:
+  - 1
+  - 2
+  - 3
+  - 4
+  - 5
+  - 6
+
+
+## ----------------------- 自蒸馏配置 -----------------------
+# whether to use distill model
+enable_ds: false
+
+## ----------------------- 是否开启 logits 辅助训练配置 -----------------------
+enable_logits_aux: true

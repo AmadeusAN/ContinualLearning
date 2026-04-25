@@ -6,6 +6,7 @@ import wandb
 from monai.data import DataLoader, Dataset, list_data_collate, decollate_batch
 from utils.load_config import load_config, config_to_args
 from rich import print
+import numpy as np
 
 # from monai.networks.nets import SwinUNETR
 from monai.transforms import (
@@ -56,7 +57,6 @@ def get_loader(args):
                 clip=True,
             ),
             CropForegroundd(keys=["image", "label"], source_key="image"),
-            # ToTensord(keys=["image", "label"]),
         ]
     )
     pred_img = []
@@ -78,31 +78,65 @@ def get_loader(args):
         pred_dataset,
         batch_size=1,
         shuffle=False,
-        num_workers=4,
+        num_workers=0,
         collate_fn=list_data_collate,
     )
     return pred_loader, val_transforms
 
 
 def detransform_save(tensor_dict, input_transform, save_dir):
+    # post_transforms = Compose(
+    #     [
+    #         # 逆转变换
+    #         Invertd(
+    #             keys=["one_channel_pred", "pred_logits"],
+    #             transform=input_transform,
+    #             orig_keys="image",
+    #             nearest_interp=[True, False],  # 标签用最近邻，Logits用线性
+    #             to_tensor=True,
+    #         ),
+    #         # 保存预测标签 (0-13)
+    #         SaveImaged(
+    #             keys="one_channel_pred",
+    #             meta_keys="label_meta_dict",
+    #             output_dir=save_dir,
+    #             output_postfix="pred",  # 这里传字符串
+    #             resample=False,
+    #             output_dtype=np.uint8,  # 标签保存为整数
+    #         ),
+    #         # 保存原始 Logits
+    #         SaveImaged(
+    #             keys="pred_logits",
+    #             meta_keys="image_meta_dict",
+    #             output_dir=save_dir,
+    #             output_postfix="logits",  # 这里传字符串
+    #             resample=False,
+    #             output_dtype=np.float32,  # Logits 保存为浮点数
+    #         ),
+    #     ]
+    # )
+    
     post_transforms = Compose(
         [
+            # 逆转变换
             Invertd(
-                keys=["label", "one_channel_pred"],
+                keys=["one_channel_pred"],
                 transform=input_transform,
                 orig_keys="image",
-                nearest_interp=True,
+                nearest_interp=[True],  # 标签用最近邻，Logits用线性
                 to_tensor=True,
             ),
+            # 保存预测标签 (0-13)
             SaveImaged(
-                keys=["one_channel_pred"],
+                keys="one_channel_pred",
                 meta_keys="label_meta_dict",
                 output_dir=save_dir,
-                output_postfix="pred",
+                output_postfix="pred",  # 这里传字符串
                 resample=False,
+                output_dtype=np.uint8,  # 标签保存为整数
             ),
         ]
-    )
+    )    
     return post_transforms(tensor_dict)
 
 
@@ -127,7 +161,7 @@ def predict(model, pred_loader, val_transforms, args):
 
     for index, batch in enumerate(tqdm(pred_loader)):
         image, label, name = batch["image"].cuda(), batch["label"], batch["name"]
-        # if os.path.isfile(os.path.join(save_dir, name[0].split('/')[0], name[0].split('/')[-1] + '.npz')):
+        
         if os.path.isdir(os.path.join(save_dir, name[0].split("/")[-1].split(".")[0])):
             continue
         with torch.no_grad():
@@ -150,6 +184,7 @@ def predict(model, pred_loader, val_transforms, args):
         B, C, D, H, W = pred_hard_post.shape
 
         # 这里使用模型的预测类别，替换标签中对应的旧类别的数据，同时保持新的类别不变
+        # 同时添加一个 logits 引导，防止伪标签失效
         # one_channel_pred = label.new_zeros((D, H, W))
         one_channel_pred = label.clone().squeeze()
         for icls in args.dataset["organ_list"]:
@@ -157,6 +192,14 @@ def predict(model, pred_loader, val_transforms, args):
             one_channel_pred[pred_hard_post[0, icls - 1] == 1] = icls
 
         batch["one_channel_pred"] = one_channel_pred.cpu()[None, None]
+        batch["pred_logits"] = pred.cpu().squeeze(dim=1)
+        
+        if args.save_npz:
+            np.save(
+                os.path.join(save_dir, name[0].split("/")[-1].split(".")[0] + "_logits.npy"),
+                arr = pred_sigmoid.as_tensor().squeeze()[:len(args.dataset["organ_list"])].cpu().numpy()
+            )
+        
         de_batch = decollate_batch(batch)
 
         detransform_save(de_batch[0], val_transforms, os.path.join(save_dir))

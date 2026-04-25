@@ -1,78 +1,106 @@
 from monai.transforms import (
-    AsDiscrete,
-    AddChanneld,
+    EnsureChannelFirstd,
     Compose,
     CropForegroundd,
     LoadImaged,
     Orientationd,
-    RandFlipd,
     RandCropByPosNegLabeld,
     RandShiftIntensityd,
     ScaleIntensityRanged,
     Spacingd,
     RandRotate90d,
     ToTensord,
-    CenterSpatialCropd,
-    Resized,
     SpatialPadd,
     apply_transform,
     RandZoomd,
     RandCropByLabelClassesd,
+    Identityd,
 )
-
-import collections.abc
-import math
-import os
-import pickle
-import shutil
-import sys
-import tempfile
-import threading
-import time
-import warnings
-from copy import copy, deepcopy
-import h5py
-
-
-import numpy as np
-import torch
-from typing import (
-    IO,
-    TYPE_CHECKING,
-    Any,
-    Callable,
-    Dict,
-    Hashable,
-    List,
-    Mapping,
-    Optional,
-    Sequence,
-    Tuple,
-    Union,
-)
-
-sys.path.append("..")
 from utils.utils import get_key
-
-from torch.utils.data import Subset
+from utils.load_config import load_config, config_to_args
 
 from monai.data import (
     DataLoader,
     Dataset,
     list_data_collate,
-    DistributedSampler,
     CacheDataset,
 )
-from monai.config import DtypeLike, KeysCollection
-from monai.transforms.transform import Transform, MapTransform
-from monai.utils.enums import TransformBackends
-from monai.config.type_definitions import NdarrayOrTensor
-from monai.transforms.io.array import LoadImage, SaveImage
-from monai.utils import GridSamplePadMode, ensure_tuple, ensure_tuple_rep
-from monai.data.image_reader import ImageReader
 from monai.utils.enums import PostFix
+from monai.transforms import SpatialCrop
+from monai.utils import fall_back_tuple, ensure_tuple
+
+import sys
+import numpy as np
+import torch
+from typing import Dict, List, Mapping, Hashable
+from copy import deepcopy
+
+sys.path.append("/public/cjh/workspace/ContinualLearning")
+del sys.path[0]
+
 
 DEFAULT_POST_FIX = PostFix.meta()
+
+
+class RandCropWithBBoxd(RandCropByPosNegLabeld):
+    def __call__(
+        self, data: Mapping[Hashable, torch.Tensor], lazy: bool and None = None
+    ) -> List[Dict[Hashable, torch.Tensor]]:
+        d = dict(data)
+        fg_indices = d.pop(self.fg_indices_key, None)
+        bg_indices = d.pop(self.bg_indices_key, None)
+
+        # 1. 触发内部随机化，生成中心点
+        self.randomize(
+            d.get(self.label_key), fg_indices, bg_indices, d.get(self.image_key)
+        )
+
+        num_samples = self.cropper.num_samples
+        ret: List = [dict(d) for _ in range(num_samples)]
+
+        # 深拷贝非 key 字段
+        for i in range(num_samples):
+            for key in set(d.keys()).difference(set(self.keys)):
+                ret[i][key] = deepcopy(d[key])
+
+        lazy_ = self.lazy if lazy is None else lazy
+
+        # 2. 执行裁剪
+        for key in self.key_iterator(d):
+            img_data = d[key]
+            img_spatial_shape = img_data.shape[1:]
+            roi_size = fall_back_tuple(
+                self.cropper.spatial_size, default=img_spatial_shape
+            )
+
+            for i, cropped_img in enumerate(
+                self.cropper(img_data, randomize=False, lazy=lazy_)
+            ):
+                ret[i][key] = cropped_img
+
+                # 3. 核心：提取 bbox
+                if key == self.keys[0]:
+                    center = self.cropper.centers[i]
+
+                    # 根据你提供的源码，SpatialCrop 初始化时会调用 compute_slices 并存入 self.slices
+                    temp_cropper = SpatialCrop(roi_center=center, roi_size=roi_size)
+
+                    # 这里的 self.slices 是一个 tuple of slice objects
+                    # 例如 (slice(None, None, None), slice(10, 74), slice(20, 84), slice(5, 69))
+                    # 第一个是 Channel 维，我们要的是后面的空间维
+                    full_slices = ensure_tuple(temp_cropper.slices)
+
+                    # 转换为 tensor: [[z_start, z_end], [y_start, y_end], [x_start, x_end]]
+                    # 这里的 s.start 和 s.stop 可能为 None，需要处理（虽然在 ROI 模式下通常有值）
+                    bbox = []
+                    for s in full_slices:
+                        if isinstance(s, slice) and s.start is not None:
+                            bbox.append([s.start, s.stop])
+
+                    # 存入结果字典
+                    ret[i]["bbox"] = torch.tensor(bbox)
+
+        return ret
 
 
 class UniformDataset(Dataset):
@@ -293,309 +321,14 @@ class Compose_Select(Compose):
         return input_
 
 
-# def get_loader(args):
-#     train_transforms = Compose(
-#         [
-#             LoadImageh5d(keys=["image", "label"]),  # 0
-#             AddChanneld(keys=["image", "label", "post_label"]),
-#             Orientationd(keys=["image", "label", "post_label"], axcodes="RAS"),
-#             Spacingd(
-#                 keys=["image", "label", "post_label"],
-#                 pixdim=(args.space_x, args.space_y, args.space_z),
-#                 mode=("bilinear", "nearest", "nearest"),
-#             ),  # process h5 to here
-#             ScaleIntensityRanged(
-#                 keys=["image"],
-#                 a_min=args.a_min,
-#                 a_max=args.a_max,
-#                 b_min=args.b_min,
-#                 b_max=args.b_max,
-#                 clip=True,
-#             ),
-#             CropForegroundd(keys=["image", "label", "post_label"], source_key="image"),
-#             SpatialPadd(
-#                 keys=["image", "label", "post_label"],
-#                 spatial_size=(args.roi_x, args.roi_y, args.roi_z),
-#                 mode="constant",
-#             ),
-#             RandZoomd_select(
-#                 keys=["image", "label", "post_label"],
-#                 prob=0.3,
-#                 min_zoom=1.3,
-#                 max_zoom=1.5,
-#                 mode=["area", "nearest", "nearest"],
-#             ),  # 7
-#             RandCropByPosNegLabeld_select(
-#                 keys=["image", "label", "post_label"],
-#                 label_key="label",
-#                 spatial_size=(args.roi_x, args.roi_y, args.roi_z),  # 192, 192, 64
-#                 pos=2,
-#                 neg=1,
-#                 num_samples=args.num_samples,
-#                 image_key="image",
-#                 image_threshold=0,
-#             ),  # 8
-#             # RandCropByLabelClassesd_select(
-#             #     keys=["image", "label", "post_label"],
-#             #     label_key="label",
-#             #     spatial_size=(args.roi_x, args.roi_y, args.roi_z), #192, 192, 64
-#             #     ratios=[1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-#             #     num_classes=39,
-#             #     # ratios=[1, 1, 5],
-#             #     # num_classes=3,
-#             #     num_samples=args.num_samples,
-#             #     image_key="image",
-#             #     image_threshold=0,
-#             # ), # 9
-#             # RandCropByLabelClassesd(
-#             #     keys=["image", "label", "post_label"],
-#             #     label_key="label",
-#             #     spatial_size=(args.roi_x, args.roi_y, args.roi_z), #192, 192, 64
-#             #     ratios=[1, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-#             #     num_classes=39,
-#             #     num_samples=args.num_samples,
-#             #     image_key="image",
-#             #     image_threshold=0,
-#             # ),
-#             RandRotate90d(
-#                 keys=["image", "label", "post_label"],
-#                 prob=0.10,
-#                 max_k=3,
-#             ),
-#             RandShiftIntensityd(
-#                 keys=["image"],
-#                 offsets=0.10,
-#                 prob=0.20,
-#             ),
-#             ToTensord(keys=["image", "label", "post_label"]),
-#         ]
-#     )
-
-#     val_transforms = Compose(
-#         [
-#             LoadImageh5d(keys=["image", "label"]),
-#             AddChanneld(keys=["image", "label"]),
-#             Orientationd(keys=["image", "label"], axcodes="RAS"),
-#             # ToTemplatelabeld(keys=['label']),
-#             # RL_Splitd(keys=['label']),
-#             Spacingd(
-#                 keys=["image", "label"],
-#                 pixdim=(args.space_x, args.space_y, args.space_z),
-#                 mode=("bilinear", "nearest"),
-#             ),  # process h5 to here
-#             ScaleIntensityRanged(
-#                 keys=["image"],
-#                 a_min=args.a_min,
-#                 a_max=args.a_max,
-#                 b_min=args.b_min,
-#                 b_max=args.b_max,
-#                 clip=True,
-#             ),
-#             CropForegroundd(keys=["image", "label", "post_label"], source_key="image"),
-#             # ToTensord(keys=["image", "label", "post_label"]),
-#         ]
-#     )
-
-#     ## training dict part
-#     train_img = []
-#     train_lbl = []
-#     train_post_lbl = []
-#     train_name = []
-
-#     for line in open(args.train_data_txt_path):
-#         if line.startswith("#"):
-#             continue
-#         name = line.strip().split()[1].split(".")[0]
-#         train_img.append(args.data_root_path + line.strip().split()[0])
-#         train_lbl.append(args.data_root_path + line.strip().split()[1])
-#         train_post_lbl.append(
-#             args.data_root_path + name.replace("label", "post_label") + ".h5"
-#         )
-#         train_name.append(name)
-#     data_dicts_train = [
-#         {"image": image, "label": label, "post_label": post_label, "name": name}
-#         for image, label, post_label, name in zip(
-#             train_img, train_lbl, train_post_lbl, train_name
-#         )
-#     ]
-#     print("train len {}".format(len(data_dicts_train)))
-
-#     ## validation dict part
-#     val_img = []
-#     val_lbl = []
-#     val_post_lbl = []
-#     val_name = []
-#     for line in open(args.val_data_txt_path):
-#         if line.startswith("#"):
-#             continue
-#         name = line.strip().split()[1].split(".")[0]
-#         val_img.append(args.data_root_path + line.strip().split()[0])
-#         val_lbl.append(args.data_root_path + line.strip().split()[1])
-#         val_post_lbl.append(
-#             args.data_root_path + name.replace("label", "post_label") + ".h5"
-#         )
-#         val_name.append(name)
-#     data_dicts_val = [
-#         {"image": image, "label": label, "post_label": post_label, "name": name}
-#         for image, label, post_label, name in zip(
-#             val_img, val_lbl, val_post_lbl, val_name
-#         )
-#     ]
-#     print("val len {}".format(len(data_dicts_val)))
-
-#     ## 暂时不需要测试
-#     ## test dict part
-#     # test_img = []
-#     # test_lbl = []
-#     # test_post_lbl = []
-#     # test_name = []
-#     # for line in open(args.test_data_txt_path):
-#     #     if line.startswith('#'):
-#     #         continue
-#     #     name = line.strip().split()[1].split('.')[0]
-#     #     test_img.append(args.data_root_path + line.strip().split()[0])
-#     #     test_lbl.append(args.data_root_path + line.strip().split()[1])
-#     #     test_post_lbl.append(args.data_root_path + name.replace('label', 'post_label') + '.h5')
-#     #     test_name.append(name)
-#     # data_dicts_test = [{'image': image, 'label': label, 'post_label': post_label, 'name': name}
-#     #             for image, label, post_label, name in zip(test_img, test_lbl, test_post_lbl, test_name)]
-#     # print('test len {}'.format(len(data_dicts_test)))
-
-#     continue_img = list()
-#     continue_lbl = list()
-#     continue_post_lbl = list()
-#     continue_name = list()
-#     for line in open(os.path.join(args.continue_data_txt_path)):
-#         if line.startswith("#"):
-#             continue
-#         name = line.strip().split()[1].split(".")[0]
-#         continue_img.append(os.path.join(args.data_root_path, line.strip().split()[0]))
-#         continue_lbl.append(os.path.join(args.data_root_path, line.strip().split()[1]))
-#         continue_post_lbl.append(
-#             os.path.join(
-#                 args.data_root_path, name.replace("label", "post_label") + ".h5"
-#             )
-#         )
-#         continue_name.append(name)
-#     data_dicts_continue = [
-#         {"image": image, "label": label, "post_label": post_label, "name": name}
-#         for image, label, post_label, name in zip(
-#             continue_img, continue_lbl, continue_post_lbl, continue_name
-#         )
-#     ]
-#     print("continue len {}".format(len(data_dicts_continue)))
-
-#     if args.phase == "train":
-#         if args.cache_dataset:
-#             if args.uniform_sample:
-#                 train_dataset = UniformCacheDataset(
-#                     data=data_dicts_train,
-#                     transform=train_transforms,
-#                     cache_rate=args.cache_rate,
-#                     datasetkey=args.datasetkey,
-#                 )
-#             else:
-#                 train_dataset = CacheDataset(
-#                     data=data_dicts_train,
-#                     transform=train_transforms,
-#                     cache_rate=args.cache_rate,
-#                 )
-#         else:
-#             if args.uniform_sample:
-#                 train_dataset = UniformDataset(
-#                     data=data_dicts_train,
-#                     transform=train_transforms,
-#                     datasetkey=args.datasetkey,
-#                 )
-#             else:
-#                 train_dataset = Dataset(
-#                     data=data_dicts_train, transform=train_transforms
-#                 )
-#         train_sampler = (
-#             DistributedSampler(dataset=train_dataset, even_divisible=True, shuffle=True)
-#             if args.dist
-#             else None
-#         )
-#         train_loader = DataLoader(
-#             train_dataset,
-#             batch_size=args.batch_size,
-#             shuffle=(train_sampler is None),
-#             num_workers=args.num_workers,
-#             collate_fn=list_data_collate,
-#             sampler=train_sampler,
-#         )
-#         return train_loader, train_sampler
-
-#     if args.phase == "validation":
-#         if args.cache_dataset:
-#             val_dataset = CacheDataset(
-#                 data=data_dicts_val,
-#                 transform=val_transforms,
-#                 cache_rate=args.cache_rate,
-#             )
-#         else:
-#             val_dataset = Dataset(data=data_dicts_val, transform=val_transforms)
-#         val_loader = DataLoader(
-#             val_dataset,
-#             batch_size=1,
-#             shuffle=False,
-#             num_workers=4,
-#             collate_fn=list_data_collate,
-#         )
-#         return val_loader, val_transforms
-
-#     if args.phase == "test":
-#         if args.cache_dataset:
-#             test_dataset = CacheDataset(
-#                 data=data_dicts_test,
-#                 transform=val_transforms,
-#                 cache_rate=args.cache_rate,
-#             )
-#         else:
-#             test_dataset = Dataset(data=data_dicts_test, transform=val_transforms)
-#         test_loader = DataLoader(
-#             test_dataset,
-#             batch_size=1,
-#             shuffle=False,
-#             num_workers=4,
-#             collate_fn=list_data_collate,
-#         )
-#         return test_loader, val_transforms
-
-#     if args.phase == "continue":
-#         if args.cache_dataset:
-#             continue_dataset = CacheDataset(
-#                 data=data_dicts_continue,
-#                 transform=train_transforms,
-#                 cache_rate=args.cache_rate,
-#             )
-#         else:
-#             continue_dataset = Dataset(
-#                 data=data_dicts_continue, transform=train_transforms
-#             )
-#         continue_sampler = (
-#             DistributedSampler(
-#                 dataset=continue_dataset, even_divisible=True, shuffle=True
-#             )
-#             if args.dist
-#             else None
-#         )
-#         continue_loader = DataLoader(
-#             continue_dataset,
-#             batch_size=args.batch_size,
-#             shuffle=(continue_sampler is None),
-#             num_workers=args.num_workers,
-#             collate_fn=list_data_collate,
-#             sampler=continue_sampler,
-#         )
-#         return continue_loader, continue_sampler
-
-
 def get_loader(args):
     train_transforms = Compose(
         [
             LoadImaged(keys=["image", "label"]),  # 0
-            AddChanneld(keys=["image", "label"]),
+            LoadImaged(keys=["logits"])
+            if args.enable_logits_aux
+            else Identityd(keys=["image", "label"]),
+            EnsureChannelFirstd(keys=["image", "label"]),
             Orientationd(keys=["image", "label"], axcodes="RAS"),
             Spacingd(
                 keys=["image", "label"],
@@ -611,50 +344,21 @@ def get_loader(args):
                 clip=True,
             ),
             CropForegroundd(keys=["image", "label"], source_key="image"),
-            SpatialPadd(
-                keys=["image", "label"],
-                spatial_size=(args.roi_x, args.roi_y, args.roi_z),
-                mode="constant",
-            ),
-            RandZoomd_select(
-                keys=["image", "label"],
-                prob=0.3,
-                min_zoom=1.3,
-                max_zoom=1.5,
-                mode=["area", "nearest"],
-            ),  # 7
-            RandCropByPosNegLabeld_select(
+            # SpatialPadd(
+            #     keys=["image", "label"],
+            #     spatial_size=(args.roi_x, args.roi_y, args.roi_z),
+            #     mode="constant",
+            # ),
+            RandCropWithBBoxd(
                 keys=["image", "label"],
                 label_key="label",
-                spatial_size=(args.roi_x, args.roi_y, args.roi_z),  # 192, 192, 64
+                spatial_size=(args.roi_x, args.roi_y, args.roi_z),
                 pos=2,
                 neg=1,
                 num_samples=args.num_samples,
                 image_key="image",
                 image_threshold=0,
             ),  # 8
-            # RandCropByLabelClassesd_select(
-            #     keys=["image", "label", "post_label"],
-            #     label_key="label",
-            #     spatial_size=(args.roi_x, args.roi_y, args.roi_z), #192, 192, 64
-            #     ratios=[1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-            #     num_classes=39,
-            #     # ratios=[1, 1, 5],
-            #     # num_classes=3,
-            #     num_samples=args.num_samples,
-            #     image_key="image",
-            #     image_threshold=0,
-            # ), # 9
-            # RandCropByLabelClassesd(
-            #     keys=["image", "label", "post_label"],
-            #     label_key="label",
-            #     spatial_size=(args.roi_x, args.roi_y, args.roi_z), #192, 192, 64
-            #     ratios=[1, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-            #     num_classes=39,
-            #     num_samples=args.num_samples,
-            #     image_key="image",
-            #     image_threshold=0,
-            # ),
             RandRotate90d(
                 keys=["image", "label"],
                 prob=0.10,
@@ -672,10 +376,8 @@ def get_loader(args):
     val_transforms = Compose(
         [
             LoadImaged(keys=["image", "label"]),
-            AddChanneld(keys=["image", "label"]),
+            EnsureChannelFirstd(keys=["image", "label"]),
             Orientationd(keys=["image", "label"], axcodes="RAS"),
-            # ToTemplatelabeld(keys=['label']),
-            # RL_Splitd(keys=['label']),
             Spacingd(
                 keys=["image", "label"],
                 pixdim=(args.space_x, args.space_y, args.space_z),
@@ -690,13 +392,14 @@ def get_loader(args):
                 clip=True,
             ),
             CropForegroundd(keys=["image", "label"], source_key="image"),
-            # ToTensord(keys=["image", "label"]),
+            # ToTensord(keys=["image", "label"]),   # 现在最新版的 monai 不需要这个了
         ]
     )
 
     # training dict part
     train_img = []
     train_lbl = []
+    train_logits = []
     train_name = []
 
     for line in open(args.train_data_txt_path):
@@ -705,11 +408,22 @@ def get_loader(args):
         name = line.strip().split()[1].split(".")[0]
         train_img.append(args.data_root_path + line.strip().split()[0])
         train_lbl.append(args.data_root_path + line.strip().split()[1])
+        if args.enable_logits_aux:
+            train_logits.append(args.data_root_path + line.strip().split()[2])
         train_name.append(name)
-    data_dicts_train = [
-        {"image": image, "label": label, "name": name}
-        for image, label, name in zip(train_img, train_lbl, train_name)
-    ]
+    data_dicts_train = (
+        [
+            {"image": image, "label": label, "name": name}
+            for image, label, name in zip(train_img, train_lbl, train_name)
+        ]
+        if not args.enable_logits_aux
+        else [
+            {"image": image, "label": label, "logits": logits, "name": name}
+            for image, label, logits, name in zip(
+                train_img, train_lbl, train_logits, train_name
+            )
+        ]
+    )
     print("train len {}".format(len(data_dicts_train)))
 
     ## validation dict part
@@ -730,156 +444,64 @@ def get_loader(args):
     print("val len {}".format(len(data_dicts_val)))
 
     print("暂时不需要测试")
-    ## test dict part
-    # test_img = []
-    # test_lbl = []
-    # test_post_lbl = []
-    # test_name = []
-    # for line in open(args.test_data_txt_path):
-    #     if line.startswith('#'):
-    #         continue
-    #     name = line.strip().split()[1].split('.')[0]
-    #     test_img.append(args.data_root_path + line.strip().split()[0])
-    #     test_lbl.append(args.data_root_path + line.strip().split()[1])
-    #     test_post_lbl.append(args.data_root_path + name.replace('label', 'post_label') + '.h5')
-    #     test_name.append(name)
-    # data_dicts_test = [{'image': image, 'label': label, 'post_label': post_label, 'name': name}
-    #             for image, label, post_label, name in zip(test_img, test_lbl, test_post_lbl, test_name)]
-    # print('test len {}'.format(len(data_dicts_test)))
 
     print("没有必要专门搞一个 continue data path")
-    # continue_img = list()
-    # continue_lbl = list()
-    # continue_post_lbl = list()
-    # continue_name = list()
-    # for line in open(os.path.join(args.continue_data_txt_path)):
-    #     if line.startswith("#"):
-    #         continue
-    #     name = line.strip().split()[1].split(".")[0]
-    #     continue_img.append(os.path.join(args.data_root_path, line.strip().split()[0]))
-    #     continue_lbl.append(os.path.join(args.data_root_path, line.strip().split()[1]))
-    #     continue_post_lbl.append(
-    #         os.path.join(
-    #             args.data_root_path, name.replace("label", "post_label") + ".h5"
-    #         )
-    #     )
-    #     continue_name.append(name)
-    # data_dicts_continue = [
-    #     {"image": image, "label": label, "post_label": post_label, "name": name}
-    #     for image, label, post_label, name in zip(
-    #         continue_img, continue_lbl, continue_post_lbl, continue_name
-    #     )
-    # ]
-    # print("continue len {}".format(len(data_dicts_continue)))
 
-    if args.phase == "train":
-        if args.cache_dataset:
-            if args.uniform_sample:
-                train_dataset = UniformCacheDataset(
-                    data=data_dicts_train,
-                    transform=train_transforms,
-                    cache_rate=args.cache_rate,
-                    datasetkey=args.datasetkey,
-                )
-            else:
-                train_dataset = CacheDataset(
-                    data=data_dicts_train,
-                    transform=train_transforms,
-                    cache_rate=args.cache_rate,
-                )
-        else:
-            if args.uniform_sample:
-                train_dataset = UniformDataset(
-                    data=data_dicts_train,
-                    transform=train_transforms,
-                    datasetkey=args.datasetkey,
-                )
-            else:
-                train_dataset = Dataset(
-                    data=data_dicts_train, transform=train_transforms
-                )
-        train_sampler = (
-            DistributedSampler(dataset=train_dataset, even_divisible=True, shuffle=True)
-            if args.dist
-            else None
-        )
-        train_loader = DataLoader(
-            train_dataset,
-            batch_size=args.batch_size,
-            shuffle=(train_sampler is None),
-            num_workers=args.num_workers,
-            collate_fn=list_data_collate,
-            sampler=train_sampler,
-        )
-        return train_loader, train_sampler
-
-    if args.phase == "validation":
-        if args.cache_dataset:
-            val_dataset = CacheDataset(
-                data=data_dicts_val,
-                transform=val_transforms,
+    if args.cache_dataset:
+        if args.uniform_sample:
+            train_dataset = UniformCacheDataset(
+                data=data_dicts_train,
+                transform=train_transforms,
                 cache_rate=args.cache_rate,
+                datasetkey=args.datasetkey,
             )
         else:
-            val_dataset = Dataset(data=data_dicts_val, transform=val_transforms)
-        val_loader = DataLoader(
-            val_dataset,
-            batch_size=1,
-            shuffle=False,
-            num_workers=4,
-            collate_fn=list_data_collate,
+            train_dataset = CacheDataset(
+                data=data_dicts_train,
+                transform=train_transforms,
+                cache_rate=args.cache_rate,
+            )
+    else:
+        if args.uniform_sample:
+            train_dataset = UniformDataset(
+                data=data_dicts_train,
+                transform=train_transforms,
+                datasetkey=args.datasetkey,
+            )
+        else:
+            train_dataset = Dataset(data=data_dicts_train, transform=train_transforms)
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=args.batch_size,
+        shuffle=True,
+        num_workers=args.num_workers,
+        collate_fn=list_data_collate,
+    )
+
+    if args.cache_dataset:
+        val_dataset = CacheDataset(
+            data=data_dicts_val,
+            transform=val_transforms,
+            cache_rate=args.cache_rate,
         )
-        return val_loader, val_transforms
+    else:
+        val_dataset = Dataset(data=data_dicts_val, transform=val_transforms)
 
-    # if args.phase == "test":
-    #     if args.cache_dataset:
-    #         test_dataset = CacheDataset(
-    #             data=data_dicts_test,
-    #             transform=val_transforms,
-    #             cache_rate=args.cache_rate,
-    #         )
-    #     else:
-    #         test_dataset = Dataset(data=data_dicts_test, transform=val_transforms)
-    #     test_loader = DataLoader(
-    #         test_dataset,
-    #         batch_size=1,
-    #         shuffle=False,
-    #         num_workers=4,
-    #         collate_fn=list_data_collate,
-    #     )
-    #     return test_loader, val_transforms
-
-    # if args.phase == "continue":
-    #     if args.cache_dataset:
-    #         continue_dataset = CacheDataset(
-    #             data=data_dicts_continue,
-    #             transform=train_transforms,
-    #             cache_rate=args.cache_rate,
-    #         )
-    #     else:
-    #         continue_dataset = Dataset(
-    #             data=data_dicts_continue, transform=train_transforms
-    #         )
-    #     continue_sampler = (
-    #         DistributedSampler(
-    #             dataset=continue_dataset, even_divisible=True, shuffle=True
-    #         )
-    #         if args.dist
-    #         else None
-    #     )
-    #     continue_loader = DataLoader(
-    #         continue_dataset,
-    #         batch_size=args.batch_size,
-    #         shuffle=(continue_sampler is None),
-    #         num_workers=args.num_workers,
-    #         collate_fn=list_data_collate,
-    #         sampler=continue_sampler,
-    #     )
-    #     return continue_loader, continue_sampler
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=1,
+        shuffle=False,
+        num_workers=4,
+        collate_fn=list_data_collate,
+    )
+    return train_loader, val_loader, val_transforms
 
 
 if __name__ == "__main__":
-    train_loader, test_loader = get_loader()
-    for index, item in enumerate(test_loader):
-        print(item["image"].shape, item["label"].shape, item["task_id"])
+    args = config_to_args(
+        load_config("/public/cjh/workspace/ContinualLearning/config.yaml")
+    )
+    train_loader, val_loader = get_loader(args)
+    for index, item in enumerate(train_loader):
+        print(item["image"].shape, item["label"].shape)
         input()
